@@ -1,0 +1,39 @@
+workflows:
+  ios-testflight:
+    name: GYRO360 iOS - TestFlight
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    integrations:
+      app_store_connect: gyro360_api_key   # имя ключа, который ты добавишь в Codemagic (Teams > Integrations > App Store Connect)
+    environment:
+      groups:
+        - app_store_credentials            # группа переменных, создashь в Codemagic (Teams > Environment variables)
+      vars:
+        BUNDLE_ID: "com.gyro360.rotator"
+        XCODE_WORKSPACE: "ios/Runner.xcworkspace"
+        XCODE_SCHEME: "Runner"
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Set up code signing
+        script: |
+          keychain initialize
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --type IOS_APP_STORE \
+            --create
+          keychain add-certificates
+          xcode-project use-profiles
+      - name: Get Flutter packages
+        script: flutter packages pub get
+      - name: Build iOS ipa
+        script: |
+          flutter build ipa --release \
+            --export-options-plist=/Users/builder/export_options.plist
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
