@@ -1,17 +1,41 @@
 workflows:
+  # Бесплатный вариант: собираем НЕПОДПИСАННЫЙ .ipa в облаке (не нужен платный
+  # Apple Developer Program). Подписываешь и ставишь на iPhone сам, локально,
+  # через программу Sideloadly (Windows) — см. инструкцию. Подпись бесплатным
+  # Apple ID действует 7 дней, потом нужно переустановить через Sideloadly ещё раз.
+  ios-unsigned:
+    name: GYRO360 iOS - Unsigned IPA (бесплатно)
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Get Flutter packages
+        script: flutter packages pub get
+      - name: Build unsigned iOS app
+        script: flutter build ios --release --no-codesign
+      - name: Package into .ipa (Payload/Runner.app)
+        script: |
+          mkdir -p build/ios/iphoneos/Payload
+          cp -r build/ios/iphoneos/Runner.app build/ios/iphoneos/Payload/
+          cd build/ios/iphoneos && zip -r gyro360-unsigned.ipa Payload
+    artifacts:
+      - build/ios/iphoneos/gyro360-unsigned.ipa
+
+  # Платный вариант (нужен Apple Developer Program, $99/год) — автоматическая
+  # подпись и публикация в TestFlight. Не используется, пока нет оплаты;
+  # оставлен на будущее, если решишь перейти на этот путь.
   ios-testflight:
-    name: GYRO360 iOS - TestFlight
+    name: GYRO360 iOS - TestFlight (нужен платный Apple Developer)
     max_build_duration: 60
     instance_type: mac_mini_m2
     integrations:
-      app_store_connect: gyro360_api_key   # имя ключа, который ты добавишь в Codemagic (Teams > Integrations > App Store Connect)
+      app_store_connect: gyro360_api_key   # имя ключа, который добавишь в Codemagic (Teams > Integrations > App Store Connect)
     environment:
-      groups:
-        - app_store_credentials            # группа переменных, создashь в Codemagic (Teams > Environment variables)
       vars:
         BUNDLE_ID: "com.gyro360.rotator"
-        XCODE_WORKSPACE: "ios/Runner.xcworkspace"
-        XCODE_SCHEME: "Runner"
       flutter: stable
       xcode: latest
       cocoapods: default
@@ -32,7 +56,6 @@ workflows:
             --export-options-plist=/Users/builder/export_options.plist
     artifacts:
       - build/ios/ipa/*.ipa
-      - /tmp/xcodebuild_logs/*.log
     publishing:
       app_store_connect:
         auth: integration
