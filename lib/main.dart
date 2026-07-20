@@ -133,6 +133,11 @@ class AppState extends ChangeNotifier {
   String ssid = '';
   String pass = '';
   String url = '';
+  // Прогресс OTA (строки вида "OTA: ...", которые ротатор шлёт через
+  // bleSendLine во время обновления) - раньше просто терялись в parseData()
+  // (нет "=", ни один case не совпадает), и в приложении вообще не было
+  // видно, идёт ли прошивка и чем она закончилась - как и в вебе до этого.
+  String otaMsg = '';
 
   // WT901 настройки (хранятся на ротаторе)
   bool wt901Enabled = false;
@@ -249,6 +254,7 @@ class _MainScreenState extends State<MainScreen> {
         if (trimmed == 'CH_2_ON') { _state.activeChannel = 1; Future.delayed(const Duration(milliseconds: 500), () { if (mounted) setState(() => _state.activeChannel = -1); }); return; }
         if (trimmed == 'CH_3_ON') { _state.activeChannel = 2; Future.delayed(const Duration(milliseconds: 500), () { if (mounted) setState(() => _state.activeChannel = -1); }); return; }
         if (trimmed == 'CH_4_ON') { _state.activeChannel = 3; Future.delayed(const Duration(milliseconds: 500), () { if (mounted) setState(() => _state.activeChannel = -1); }); return; }
+        if (trimmed.startsWith('OTA:')) { _state.otaMsg = trimmed; return; }
         _state.parseData(data);
       });
     });
@@ -1507,6 +1513,12 @@ class _FirmwarePageState extends State<_FirmwarePage> {
         style: ElevatedButton.styleFrom(backgroundColor: Colors.grey.shade300, foregroundColor: Colors.black, padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 12)),
         child: const Text('Update', style: TextStyle(fontSize: 16)),
       ),
+      if (widget.state.otaMsg.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Text(widget.state.otaMsg.replaceFirst('OTA:', '').trim(),
+              textAlign: TextAlign.center, style: const TextStyle(fontSize: 13, color: Colors.black54)),
+        ),
     ]));
   }
 
