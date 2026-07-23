@@ -7,6 +7,13 @@ workflows:
     name: GYRO360 iOS - Unsigned IPA (бесплатно)
     max_build_duration: 60
     instance_type: mac_mini_m2
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+          source: true
     environment:
       flutter: stable
       xcode: latest
