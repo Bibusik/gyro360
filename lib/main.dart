@@ -84,15 +84,19 @@ class BtManager {
 
   void setHighPriority(bool high) {} // no-op for BLE
 
-  void send(String msg) {
+  Future<void> send(String msg) async {
     if (_rxChar == null || !_connected) return;
     // withoutResponse:true раньше — если пакет терялся (например при слабом
     // сигнале), UI всё равно показывал переключённое состояние, хотя прошивка
     // команду не получала (именно так тумблер WT901 "выключался" только в
     // приложении, а на роторе оставался включён). Команды тут все разовые
     // (не непрерывный поток), так что ждать подтверждение не в тягость.
+    // await обязателен: send() раньше не ждал завершения записи, и несколько
+    // send() подряд без паузы (SSID/PASS/URL/UPDATE у кнопки Update) могли
+    // оборвать более длинную запись (URL с токеном, >100 символов) следующей -
+    // именно так терялась часть токена ("...ota.php?t;" вместо "...?t=<токен>;").
     try {
-      _rxChar!.write(Uint8List.fromList('$msg\n'.codeUnits), withoutResponse: false);
+      await _rxChar!.write(Uint8List.fromList('$msg\n'.codeUnits), withoutResponse: false);
     } catch (_) {}
   }
 
@@ -1509,15 +1513,18 @@ class _FirmwarePageState extends State<_FirmwarePage> {
         ),
       const SizedBox(height: 16),
       ElevatedButton(
-        onPressed: () {
+        onPressed: () async {
           // Поля SSID/PASS/URL шлют своё значение только по потере фокуса
           // (см. addListener выше) - если нажать Update сразу после ввода,
           // не тапнув по другому полю, последняя правка никогда не уходила
           // на коробку. Явно досылаем текущие значения перед самим Update.
-          bt.send('SSID=${_ssid.text};');
-          bt.send('PASS=${_pass.text};');
-          bt.send('URL=${_url.text};');
-          bt.send('UPDATE=1;');
+          // await между вызовами обязателен - без него более длинная запись
+          // (URL с токеном) обрывалась следующим send() раньше, чем BLE-стек
+          // успевал её дописать (send() теперь сам ждёт завершения записи).
+          await bt.send('SSID=${_ssid.text};');
+          await bt.send('PASS=${_pass.text};');
+          await bt.send('URL=${_url.text};');
+          await bt.send('UPDATE=1;');
         },
         style: ElevatedButton.styleFrom(backgroundColor: Colors.grey.shade300, foregroundColor: Colors.black, padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 12)),
         child: const Text('Update', style: TextStyle(fontSize: 16)),
