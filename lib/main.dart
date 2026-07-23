@@ -1509,7 +1509,16 @@ class _FirmwarePageState extends State<_FirmwarePage> {
         ),
       const SizedBox(height: 16),
       ElevatedButton(
-        onPressed: () => bt.send('UPDATE=1;'),
+        onPressed: () {
+          // Поля SSID/PASS/URL шлют своё значение только по потере фокуса
+          // (см. addListener выше) - если нажать Update сразу после ввода,
+          // не тапнув по другому полю, последняя правка никогда не уходила
+          // на коробку. Явно досылаем текущие значения перед самим Update.
+          bt.send('SSID=${_ssid.text};');
+          bt.send('PASS=${_pass.text};');
+          bt.send('URL=${_url.text};');
+          bt.send('UPDATE=1;');
+        },
         style: ElevatedButton.styleFrom(backgroundColor: Colors.grey.shade300, foregroundColor: Colors.black, padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 12)),
         child: const Text('Update', style: TextStyle(fontSize: 16)),
       ),
