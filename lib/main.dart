@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'dart:async';
-import 'dart:convert';
+import 'dart:io' show Platform;
 import 'dart:typed_data';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -1019,17 +1019,17 @@ class _RemotePage extends StatefulWidget {
 class _RemotePageState extends State<_RemotePage> {
   late double _deadVal, _speedVal, _speed2AngleVal, _speed2Val;
 
+  // Скан BLE-устройств поблизости для привязки WT901 - только на Android.
+  // На iOS flutter_blue_plus не может получить настоящий MAC-адрес -
+  // CoreBluetooth подставляет вместо него случайный UUID (per-app
+  // CBPeripheral.identifier), поэтому сканирование на iPhone принципиально
+  // не может работать - см. build(), там скан скрыт для iOS. Привязка MAC
+  // на iPhone возможна только через веб-страницу ротора (ручной ввод байт).
+  final Map<String, ScanResult> _scanResults = {};
+  bool _scanning = false;
+  StreamSubscription<List<ScanResult>>? _scanSub;
   String? _connectedMac;   // MAC выбранного устройства
   String? _connectedName;
-
-  // Скан ищет WT901 самой коробкой (BLE-central на ESP32), а не телефоном -
-  // единственный способ, одинаково работающий на Android, iPhone и вебе (на
-  // iOS приложение в принципе не может получить настоящий MAC устройства,
-  // см. WT901_SCAN). Раньше тут был ещё отдельный скан со стороны телефона
-  // (flutter_blue_plus) - убран как дублирующий и неработающий на iPhone.
-  List<Map<String, dynamic>> _boxScanResults = [];
-  bool _boxScanning = false;
-  StreamSubscription<String>? _boxScanSub;
 
   @override
   void initState() {
@@ -1040,45 +1040,7 @@ class _RemotePageState extends State<_RemotePage> {
     _speed2Val = widget.state.wt901Speed2.toDouble().clamp(1.0, 25.0);
     _syncConnectedFromState();
     widget.state.addListener(_onStateChange);
-    _boxScanSub = widget.bt.dataStream.listen((data) {
-      final trimmed = data.trim();
-      if (trimmed.startsWith('WT901_FOUND=')) {
-        _onBoxScanResult(trimmed.substring('WT901_FOUND='.length));
-      }
-    });
-  }
-
-  void _onBoxScanResult(String json) {
-    if (!mounted) return;
-    setState(() {
-      _boxScanning = false;
-      try {
-        _boxScanResults = (jsonDecode(json) as List).cast<Map<String, dynamic>>();
-      } catch (_) {
-        _boxScanResults = [];
-      }
-    });
-  }
-
-  void _startBoxScan() {
-    setState(() { _boxScanning = true; _boxScanResults = []; });
-    widget.bt.send('WT901_SCAN=1;');
-    // Скан на роторе блокирующий (~4с) - подстрахуем таймаутом на случай,
-    // если BLE-notify с результатом потеряется (слабый сигнал).
-    Future.delayed(const Duration(seconds: 7), () {
-      if (mounted && _boxScanning) setState(() => _boxScanning = false);
-    });
-  }
-
-  void _selectBoxDevice(Map<String, dynamic> d) {
-    final mac = d['mac'] as String;
-    final name = d['name'] as String?;
-    setState(() {
-      _connectedMac = mac;
-      _connectedName = (name != null && name.isNotEmpty) ? name : mac;
-      _boxScanResults = [];
-    });
-    widget.bt.send('WT901_MAC=$mac;');
+    if (!Platform.isIOS) _startScan();
   }
 
   // Статус "подключено" раньше жил только в локальной переменной сессии
@@ -1111,8 +1073,43 @@ class _RemotePageState extends State<_RemotePage> {
   @override
   void dispose() {
     widget.state.removeListener(_onStateChange);
-    _boxScanSub?.cancel();
+    _scanSub?.cancel();
+    FlutterBluePlus.stopScan();
     super.dispose();
+  }
+
+  void _startScan() {
+    setState(() { _scanning = true; _scanResults.clear(); });
+    _scanSub?.cancel();
+    FlutterBluePlus.stopScan();
+    _scanSub = FlutterBluePlus.scanResults.listen((results) {
+      for (final r in results) {
+        // Не показываем сам ротор (GYRO360) — это другое устройство/протокол
+        if (r.device.platformName.isNotEmpty && r.device.platformName != 'GYRO360') {
+          setState(() => _scanResults[r.device.remoteId.str] = r);
+        }
+      }
+    });
+    FlutterBluePlus.isScanning.listen((scanning) {
+      if (mounted) setState(() => _scanning = scanning);
+    });
+    FlutterBluePlus.startScan(timeout: const Duration(seconds: 8));
+  }
+
+  void _stopScan() {
+    _scanSub?.cancel();
+    FlutterBluePlus.stopScan();
+    setState(() => _scanning = false);
+  }
+
+  void _selectDevice(ScanResult r) {
+    _stopScan();
+    setState(() {
+      _connectedMac  = r.device.remoteId.str;
+      _connectedName = r.device.platformName.isNotEmpty ? r.device.platformName : r.device.remoteId.str;
+    });
+    // Отправляем MAC на ротатор
+    widget.bt.send('WT901_MAC=${r.device.remoteId.str};');
   }
 
   void _disconnectDevice() {
@@ -1184,7 +1181,7 @@ class _RemotePageState extends State<_RemotePage> {
           onChanged: (v) {
             setState(() => s.wt901Enabled = v);
             bt.send('WT901_ENABLED=${v ? 1 : 0};');
-            if (!v) { _connectedMac = null; _connectedName = null; }
+            if (!v) { _stopScan(); _connectedMac = null; _connectedName = null; }
           },
         )),
       ),
@@ -1271,58 +1268,63 @@ class _RemotePageState extends State<_RemotePage> {
                 ]),
                 const SizedBox(height: 8),
 
-                // Список найденных устройств. Скан выполняет сам ротатор
-                // (BLE-central на ESP32), а не телефон - единственный способ,
-                // одинаково надёжно работающий на Android, iPhone и вебе (см.
-                // WT901_SCAN на прошивке). Раньше здесь было два отдельных
-                // скана (ещё и со стороны телефона) - убрано как дублирующее.
-                Row(children: [
-                  const Expanded(child: Text('Nearby devices:', style: TextStyle(fontWeight: FontWeight.bold))),
-                  if (_boxScanning)
-                    const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                // Список найденных устройств (скан со стороны телефона). На
+                // iOS CoreBluetooth не отдаёт настоящий MAC-адрес стороннему
+                // приложению (per-app случайный UUID вместо него), поэтому
+                // сканирование на iPhone принципиально невозможно - вместо
+                // списка показываем пояснение (см. ниже).
+                if (Platform.isIOS)
+                  Text(
+                    'Scanning is not available on iPhone (iOS hides the real Bluetooth address from apps). '
+                    'Open the rotator\'s Wi-Fi web page and enter the WT901 MAC address manually there.',
+                    style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
+                  )
+                else ...[
+                  Row(children: [
+                    const Expanded(child: Text('Nearby devices:', style: TextStyle(fontWeight: FontWeight.bold))),
+                    if (_scanning)
+                      const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                    else
+                      IconButton(
+                        icon: const Icon(Icons.refresh, size: 20),
+                        onPressed: _startScan,
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                      ),
+                  ]),
+                  const SizedBox(height: 4),
+                  if (_scanResults.isEmpty && !_scanning)
+                    Text('Press refresh to scan', style: TextStyle(color: Colors.grey.shade600, fontSize: 13))
                   else
-                    IconButton(
-                      icon: const Icon(Icons.refresh, size: 20),
-                      onPressed: _startBoxScan,
-                      padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(),
-                    ),
-                ]),
-                const SizedBox(height: 4),
-                if (_boxScanResults.isEmpty && !_boxScanning)
-                  Text('Press refresh to scan', style: TextStyle(color: Colors.grey.shade600, fontSize: 13))
-                else
-                  ..._boxScanResults.map((d) {
-                    final mac = d['mac'] as String;
-                    final name = d['name'] as String?;
-                    final rssi = d['rssi'] as int? ?? 0;
-                    final isSelected = mac == _connectedMac;
-                    return ListTile(
-                      dense: true,
-                      contentPadding: EdgeInsets.zero,
-                      leading: Icon(Icons.sensors, color: isSelected ? Colors.green : const Color(0xFF546E7A)),
-                      title: Text((name != null && name.isNotEmpty) ? name : mac,
-                          style: TextStyle(fontWeight: isSelected ? FontWeight.bold : FontWeight.normal, fontSize: 14)),
-                      subtitle: Text(mac, style: const TextStyle(fontSize: 11)),
-                      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                        _SignalBars(_rssiBars(rssi)),
-                        const SizedBox(width: 8),
-                        if (isSelected)
-                          const Icon(Icons.check_circle, color: Colors.green, size: 20)
-                        else
-                          ElevatedButton(
-                            onPressed: () => _selectBoxDevice(d),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.grey.shade300,
-                              foregroundColor: Colors.black,
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                              minimumSize: Size.zero,
+                    ..._scanResults.values.map((r) {
+                      final isSelected = r.device.remoteId.str == _connectedMac;
+                      return ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.sensors, color: isSelected ? Colors.green : const Color(0xFF546E7A)),
+                        title: Text(r.device.platformName.isNotEmpty ? r.device.platformName : r.device.remoteId.str,
+                            style: TextStyle(fontWeight: isSelected ? FontWeight.bold : FontWeight.normal, fontSize: 14)),
+                        subtitle: Text(r.device.remoteId.str, style: const TextStyle(fontSize: 11)),
+                        trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                          _SignalBars(_rssiBars(r.rssi)),
+                          const SizedBox(width: 8),
+                          if (isSelected)
+                            const Icon(Icons.check_circle, color: Colors.green, size: 20)
+                          else
+                            ElevatedButton(
+                              onPressed: () => _selectDevice(r),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.grey.shade300,
+                                foregroundColor: Colors.black,
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                minimumSize: Size.zero,
+                              ),
+                              child: const Text('Select', style: TextStyle(fontSize: 12)),
                             ),
-                            child: const Text('Select', style: TextStyle(fontSize: 12)),
-                          ),
-                      ]),
-                    );
-                  }),
+                        ]),
+                      );
+                    }),
+                ],
               ]),
             ),
 
