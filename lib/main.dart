@@ -1032,10 +1032,14 @@ class _RemotePageState extends State<_RemotePage> {
   String? _connectedName;
 
   // Ручной ввод MAC - единственный способ привязать WT901 на iPhone прямо
-  // из приложения (без скана). Отправляется той же командой WT901_MAC=,
-  // что и при выборе устройства из скана на Android - никакого сканирования
-  // тут не требуется, это просто BLE-запись уже известного значения.
-  final TextEditingController _manualMacCtrl = TextEditingController();
+  // из приложения (без скана). 6 полей по 2 символа - как на веб-странице
+  // ротора (macb-боксы), а не одно поле с двоеточиями: так меньше шанс
+  // опечататься в формате и вводить удобнее с телефонной клавиатуры.
+  // Отправляется той же командой WT901_MAC=, что и при выборе устройства из
+  // скана на Android - никакого сканирования тут не требуется, это просто
+  // BLE-запись уже известного значения.
+  final List<TextEditingController> _manualMacCtrls = List.generate(6, (_) => TextEditingController());
+  final List<FocusNode> _manualMacFocus = List.generate(6, (_) => FocusNode());
 
   @override
   void initState() {
@@ -1050,14 +1054,12 @@ class _RemotePageState extends State<_RemotePage> {
   }
 
   void _submitManualMac() {
-    var mac = _manualMacCtrl.text.trim().toUpperCase();
-    if (mac.isEmpty) return;
+    final mac = _manualMacCtrls.map((c) => c.text.trim().padLeft(2, '0').toUpperCase()).join(':');
     setState(() {
       _connectedMac = mac;
       _connectedName = mac;
     });
     widget.bt.send('WT901_MAC=$mac;');
-    _manualMacCtrl.clear();
     FocusManager.instance.primaryFocus?.unfocus();
   }
 
@@ -1093,7 +1095,8 @@ class _RemotePageState extends State<_RemotePage> {
     widget.state.removeListener(_onStateChange);
     _scanSub?.cancel();
     FlutterBluePlus.stopScan();
-    _manualMacCtrl.dispose();
+    for (final c in _manualMacCtrls) { c.dispose(); }
+    for (final f in _manualMacFocus) { f.dispose(); }
     super.dispose();
   }
 
@@ -1300,22 +1303,43 @@ class _RemotePageState extends State<_RemotePage> {
                     style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
                   ),
                   const SizedBox(height: 8),
-                  Row(children: [
-                    Expanded(
-                      child: TextField(
-                        controller: _manualMacCtrl,
-                        textCapitalization: TextCapitalization.characters,
-                        decoration: const InputDecoration(
-                          isDense: true,
-                          hintText: 'AA:BB:CC:DD:EE:FF',
-                          border: OutlineInputBorder(),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      for (int i = 0; i < 6; i++) ...[
+                        SizedBox(
+                          width: 36,
+                          child: TextField(
+                            controller: _manualMacCtrls[i],
+                            focusNode: _manualMacFocus[i],
+                            textAlign: TextAlign.center,
+                            textCapitalization: TextCapitalization.characters,
+                            maxLength: 2,
+                            decoration: const InputDecoration(
+                              counterText: '',
+                              isDense: true,
+                              contentPadding: EdgeInsets.symmetric(vertical: 8),
+                              border: OutlineInputBorder(),
+                            ),
+                            onChanged: (v) {
+                              // Автопереход к следующему байту - вводить с
+                              // телефонной клавиатуры быстрее без ручного
+                              // перетыкивания между 6 полями.
+                              if (v.length >= 2 && i < 5) {
+                                FocusScope.of(context).requestFocus(_manualMacFocus[i + 1]);
+                              }
+                            },
+                          ),
                         ),
-                        onSubmitted: (_) => _submitManualMac(),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    ElevatedButton(onPressed: _submitManualMac, child: const Text('Set')),
-                  ]),
+                        if (i < 5) const Padding(padding: EdgeInsets.symmetric(horizontal: 2), child: Text(':')),
+                      ],
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(onPressed: _submitManualMac, child: const Text('Set MAC')),
+                  ),
                 ] else ...[
                   Row(children: [
                     const Expanded(child: Text('Nearby devices:', style: TextStyle(fontWeight: FontWeight.bold))),
