@@ -1031,6 +1031,12 @@ class _RemotePageState extends State<_RemotePage> {
   String? _connectedMac;   // MAC выбранного устройства
   String? _connectedName;
 
+  // Ручной ввод MAC - единственный способ привязать WT901 на iPhone прямо
+  // из приложения (без скана). Отправляется той же командой WT901_MAC=,
+  // что и при выборе устройства из скана на Android - никакого сканирования
+  // тут не требуется, это просто BLE-запись уже известного значения.
+  final TextEditingController _manualMacCtrl = TextEditingController();
+
   @override
   void initState() {
     super.initState();
@@ -1041,6 +1047,18 @@ class _RemotePageState extends State<_RemotePage> {
     _syncConnectedFromState();
     widget.state.addListener(_onStateChange);
     if (!Platform.isIOS) _startScan();
+  }
+
+  void _submitManualMac() {
+    var mac = _manualMacCtrl.text.trim().toUpperCase();
+    if (mac.isEmpty) return;
+    setState(() {
+      _connectedMac = mac;
+      _connectedName = mac;
+    });
+    widget.bt.send('WT901_MAC=$mac;');
+    _manualMacCtrl.clear();
+    FocusManager.instance.primaryFocus?.unfocus();
   }
 
   // Статус "подключено" раньше жил только в локальной переменной сессии
@@ -1075,6 +1093,7 @@ class _RemotePageState extends State<_RemotePage> {
     widget.state.removeListener(_onStateChange);
     _scanSub?.cancel();
     FlutterBluePlus.stopScan();
+    _manualMacCtrl.dispose();
     super.dispose();
   }
 
@@ -1272,14 +1291,32 @@ class _RemotePageState extends State<_RemotePage> {
                 // iOS CoreBluetooth не отдаёт настоящий MAC-адрес стороннему
                 // приложению (per-app случайный UUID вместо него), поэтому
                 // сканирование на iPhone принципиально невозможно - вместо
-                // списка показываем пояснение (см. ниже).
-                if (Platform.isIOS)
+                // списка показываем поле ручного ввода (тот же MAC, отправка
+                // идёт обычной BLE-записью, сканирование тут не нужно).
+                if (Platform.isIOS) ...[
                   Text(
                     'Scanning is not available on iPhone (iOS hides the real Bluetooth address from apps). '
-                    'Open the rotator\'s Wi-Fi web page and enter the WT901 MAC address manually there.',
+                    'Enter the WT901 MAC address manually below.',
                     style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
-                  )
-                else ...[
+                  ),
+                  const SizedBox(height: 8),
+                  Row(children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _manualMacCtrl,
+                        textCapitalization: TextCapitalization.characters,
+                        decoration: const InputDecoration(
+                          isDense: true,
+                          hintText: 'AA:BB:CC:DD:EE:FF',
+                          border: OutlineInputBorder(),
+                        ),
+                        onSubmitted: (_) => _submitManualMac(),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    ElevatedButton(onPressed: _submitManualMac, child: const Text('Set')),
+                  ]),
+                ] else ...[
                   Row(children: [
                     const Expanded(child: Text('Nearby devices:', style: TextStyle(fontWeight: FontWeight.bold))),
                     if (_scanning)
