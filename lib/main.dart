@@ -1139,6 +1139,21 @@ class _RemotePageState extends State<_RemotePage> {
     widget.bt.send('WT901_MAC=;');
   }
 
+  Future<void> _confirmDisconnect() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Unpair WT901?'),
+        content: const Text('The rotator will forget the saved MAC address. You will need to pair it again.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Agree')),
+        ],
+      ),
+    );
+    if (confirmed == true) _disconnectDevice();
+  }
+
   int _rssiBars(int? rssi) {
     if (rssi == null) return 1;
     if (rssi >= -60) return 5;
@@ -1283,7 +1298,7 @@ class _RemotePageState extends State<_RemotePage> {
                   if (_connectedMac != null)
                     IconButton(
                       icon: const Icon(Icons.close, color: Colors.red, size: 20),
-                      onPressed: _disconnectDevice,
+                      onPressed: _confirmDisconnect,
                       padding: EdgeInsets.zero,
                       constraints: const BoxConstraints(),
                     ),
@@ -1309,26 +1324,40 @@ class _RemotePageState extends State<_RemotePage> {
                       for (int i = 0; i < 6; i++) ...[
                         SizedBox(
                           width: 36,
-                          child: TextField(
-                            controller: _manualMacCtrls[i],
-                            focusNode: _manualMacFocus[i],
-                            textAlign: TextAlign.center,
-                            textCapitalization: TextCapitalization.characters,
-                            maxLength: 2,
-                            decoration: const InputDecoration(
-                              counterText: '',
-                              isDense: true,
-                              contentPadding: EdgeInsets.symmetric(vertical: 8),
-                              border: OutlineInputBorder(),
-                            ),
-                            onChanged: (v) {
-                              // Автопереход к следующему байту - вводить с
-                              // телефонной клавиатуры быстрее без ручного
-                              // перетыкивания между 6 полями.
-                              if (v.length >= 2 && i < 5) {
-                                FocusScope.of(context).requestFocus(_manualMacFocus[i + 1]);
+                          child: Focus(
+                            onKeyEvent: (node, event) {
+                              // Backspace на уже пустом поле - прыгаем в
+                              // предыдущее (тот же UX, что у кодов
+                              // подтверждения из 6 цифр).
+                              if (event is KeyDownEvent &&
+                                  event.logicalKey == LogicalKeyboardKey.backspace &&
+                                  _manualMacCtrls[i].text.isEmpty &&
+                                  i > 0) {
+                                FocusScope.of(context).requestFocus(_manualMacFocus[i - 1]);
                               }
+                              return KeyEventResult.ignored;
                             },
+                            child: TextField(
+                              controller: _manualMacCtrls[i],
+                              focusNode: _manualMacFocus[i],
+                              textAlign: TextAlign.center,
+                              textCapitalization: TextCapitalization.characters,
+                              maxLength: 2,
+                              decoration: const InputDecoration(
+                                counterText: '',
+                                isDense: true,
+                                contentPadding: EdgeInsets.symmetric(vertical: 8),
+                                border: OutlineInputBorder(),
+                              ),
+                              onChanged: (v) {
+                                // Автопереход к следующему байту - вводить с
+                                // телефонной клавиатуры быстрее без ручного
+                                // перетыкивания между 6 полями.
+                                if (v.length >= 2 && i < 5) {
+                                  FocusScope.of(context).requestFocus(_manualMacFocus[i + 1]);
+                                }
+                              },
+                            ),
                           ),
                         ),
                         if (i < 5) const Padding(padding: EdgeInsets.symmetric(horizontal: 2), child: Text(':')),
