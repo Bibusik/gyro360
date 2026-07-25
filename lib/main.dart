@@ -128,6 +128,7 @@ class AppState extends ChangeNotifier {
   bool keepSearchPos = false;
   bool reverseWire = false;
   bool reverseWifi = false;
+  String pedalMac = '';
   int searchMsec = 0;
   List<String> chFunctions = ['OFF', 'OFF', 'OFF', 'OFF'];
   static const chOptions = ['OFF', 'LEFT', 'RIGHT', 'SEARCH', 'GYRO', 'HOLD'];
@@ -193,6 +194,7 @@ class AppState extends ChangeNotifier {
         case 'SAVE_POS': keepSearchPos = v == '1';
         case 'PEDAL_WIRE_REV': reverseWire = v == '1';
         case 'PEDAL_WIFI_REV': reverseWifi = v == '1';
+        case 'PEDAL_MAC': pedalMac = v;
         case 'SEARCH_MSEC': searchMsec = int.tryParse(v) ?? searchMsec;
         case 'CH_1': if (int.tryParse(v) != null) chFunctions[0] = chOptions[int.parse(v)];
         case 'CH_2': if (int.tryParse(v) != null) chFunctions[1] = chOptions[int.parse(v)];
@@ -919,6 +921,21 @@ class _PedalPageState extends State<_PedalPage> {
   @override
   void dispose() { widget.state.removeListener(_onStateChange); super.dispose(); }
 
+  Future<void> _confirmUnpairPedal() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Unpair wireless pedal?'),
+        content: const Text('The rotator will forget the paired pedal. No wireless pedal will work until you pair one again.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Agree')),
+        ],
+      ),
+    );
+    if (confirmed == true) widget.bt.send('PEDAL_UNPAIR=1;');
+  }
+
   @override
   Widget build(BuildContext context) {
     final s = widget.state; final bt = widget.bt;
@@ -942,6 +959,18 @@ class _PedalPageState extends State<_PedalPage> {
         ElevatedButton(onPressed: () => bt.send('PAIR=1;'), style: ElevatedButton.styleFrom(backgroundColor: Colors.grey.shade300, foregroundColor: Colors.black), child: const Text('Start')),
         const SizedBox(width: 8),
         ElevatedButton(onPressed: () => bt.send('PAIR=0;'), style: ElevatedButton.styleFrom(backgroundColor: Colors.grey.shade300, foregroundColor: Colors.black), child: const Text('Stop')),
+      ])),
+      Padding(padding: const EdgeInsets.symmetric(horizontal: 16), child: Row(children: [
+        Expanded(child: Text(
+          s.pedalMac.isNotEmpty ? 'Paired: ${s.pedalMac}' : 'No wireless pedal paired - pedal will not work until paired',
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: s.pedalMac.isNotEmpty ? FontWeight.bold : FontWeight.normal,
+            color: s.pedalMac.isNotEmpty ? Colors.green.shade800 : Colors.grey.shade600,
+          ),
+        )),
+        if (s.pedalMac.isNotEmpty)
+          TextButton(onPressed: _confirmUnpairPedal, child: const Text('Unpair', style: TextStyle(color: Colors.red))),
       ])),
     ]));
   }
