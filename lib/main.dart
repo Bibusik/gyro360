@@ -2,10 +2,20 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'dart:async';
 import 'dart:io' show Platform;
+import 'dart:math';
 import 'dart:typed_data';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:sensors_plus/sensors_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:wifi_scan/wifi_scan.dart';
+
+// Источник наклона для режима Rod Remote. Ротатору всё равно, откуда пришёл
+// угол: физический WT901 шлёт его сам по своему BLE-каналу, телефон - командой
+// PITCH=. Поэтому все настройки (мёртвая зона, скорости, ось, реверс, ноль)
+// у обоих общие, меняется только источник.
+enum RemoteSource { wt901, off, phone }
 
 void main() {
   runApp(const Gyro360App());
@@ -157,6 +167,15 @@ class AppState extends ChangeNotifier {
   bool wt901RollReverse = false;
   bool wt901PitchReverse = false;
   bool wt901YawReverse = false;
+  // Центр (ноль) оси, который хранит сама прошивка - её же кнопка ZERO его и
+  // задаёт. Нужен приложению только чтобы правильно показать, попал ли
+  // текущий наклон телефона в мёртвую зону.
+  double wt901PitchZero = 0;
+  // Источник наклона на коробке: телефон или физический датчик. Коробка его
+  // не сохраняет (живёт только пока телефон подключён), но присылает в
+  // статусе - чтобы переключатель в приложении показывал реальное положение
+  // дел, а не то, что мы думаем.
+  bool wt901SrcPhone = false;
 
   void reset() {
     motorDeg = 0; reduction = 0; maxSpeedRpm = 0; minSpeedRpm = 0;
@@ -235,6 +254,8 @@ class AppState extends ChangeNotifier {
         case 'WT901_ROLL_REV': wt901RollReverse = v == '1';
         case 'WT901_PITCH_REV': wt901PitchReverse = v == '1';
         case 'WT901_YAW_REV': wt901YawReverse = v == '1';
+        case 'WT901_PITCH_ZERO': wt901PitchZero = double.tryParse(v) ?? wt901PitchZero;
+        case 'WT901_SRC': wt901SrcPhone = v == '1';
       }
     }
     notifyListeners();
@@ -1083,6 +1104,228 @@ class _RemotePageState extends State<_RemotePage> {
   final List<TextEditingController> _manualMacCtrls = List.generate(6, (_) => TextEditingController());
   final List<FocusNode> _manualMacFocus = List.generate(6, (_) => FocusNode());
 
+  // ── Телефон как источник наклона ──────────────────────────────────────
+  // Прошивку менять не нужно: команда PITCH=<угол>; уже есть и кладёт
+  // значение туда же, куда пишет настоящий WT901.
+  RemoteSource _source = RemoteSource.off;
+  StreamSubscription<AccelerometerEvent>? _accelSub;
+  Timer? _phoneSendTimer;
+  double _phonePitch = 0;      // итоговый наклон телефона, градусы
+  double _phoneAccelAngle = 0; // угол только по акселерометру (шумный, но без дрейфа)
+  bool _phoneFiltInit = false;
+  int _phoneTilt = 0;          // ось ТЕЛЕФОНА: 0 = Pitch, 1 = Roll, 2 = Yaw
+  // Ось WT901 запоминается отдельно от телефонной: у источников она разная
+  // (например, на пульте Roll, а на телефоне Yaw), и при переключении между
+  // ними каждый должен вернуться к своей. На коробке ось одна, поэтому
+  // помнить, что где было, приходится приложению. null = ещё не знаем, каким
+  // был выбор для WT901 (возьмём то, что придёт от коробки).
+  int? _wt901Axis;
+
+  // Обе оси храним на телефоне, чтобы выбор пережил и перезапуск приложения.
+  // На коробке ось всего одна, так что она такое разделение хранить не может.
+  static const _kPrefPhoneTilt = 'phoneTilt';
+  static const _kPrefWt901Axis = 'wt901AxisForRemote';
+  static const _kPrefLockRot   = 'lockRotation';
+  static const _kPrefKeepAwake = 'keepAwake';
+
+  // Управление наклоном телефона конфликтует с его же системными функциями:
+  // наклон вбок вызывает автоповорот экрана (интерфейс переворачивается прямо
+  // во время работы), а погасший экран останавливает поток данных с датчиков.
+  // Поэтому обе штуки можно отключить прямо отсюда.
+  bool _lockRotation = true;
+  bool _keepAwake = true;
+
+  void _applyScreenPrefs() {
+    SystemChrome.setPreferredOrientations(_lockRotation
+        ? [DeviceOrientation.portraitUp]
+        : DeviceOrientation.values);
+    WakelockPlus.toggle(enable: _keepAwake);
+  }
+
+  Future<void> _loadAxisPrefs() async {
+    final p = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() {
+      _phoneTilt = p.getInt(_kPrefPhoneTilt) ?? _phoneTilt;
+      _wt901Axis = p.getInt(_kPrefWt901Axis);
+      _lockRotation = p.getBool(_kPrefLockRot) ?? _lockRotation;
+      _keepAwake = p.getBool(_kPrefKeepAwake) ?? _keepAwake;
+    });
+    _applyScreenPrefs();
+  }
+
+  Future<void> _saveAxisPrefs() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setInt(_kPrefPhoneTilt, _phoneTilt);
+    await p.setBool(_kPrefLockRot, _lockRotation);
+    await p.setBool(_kPrefKeepAwake, _keepAwake);
+    final a = _wt901Axis;
+    if (a != null) await p.setInt(_kPrefWt901Axis, a);
+  }
+  StreamSubscription<GyroscopeEvent>? _gyroSub;
+  int? _lastGyroUs;
+  // Последний вектор силы тяжести (из акселерометра). Нужен для Yaw: чтобы
+  // поворот считался вокруг ВЕРТИКАЛИ МИРА, а не вокруг оси телефона -
+  // тогда неважно, как держат телефон (плашмя, стоймя, под углом).
+  double _gx = 0, _gy = 0, _gz = 0;
+  double _phoneYaw = 0;        // накопленный поворот, градусы
+
+  // Ноль НЕ считаем в приложении: этим занимается сама прошивка по кнопке
+  // "ZERO CURRENT AXIS" (она запоминает текущий угол как центр и хранит его
+  // во флеше). Телефон ведёт себя ровно как настоящий WT901 - шлёт сырой
+  // угол, а центровку делает коробка. Значение центра приходит обратно в
+  // WT901_PITCH_ZERO и нужно нам только для показа мёртвой зоны на экране.
+  // Отдельное, СИЛЬНОЕ сглаживание только для цифры на экране: глазу нужна
+  // спокойная цифра, а управлению - быстрая реакция. Поэтому на коробку идёт
+  // _phonePitch (слияние гиро+акселерометра), а показывается вот это.
+  double _phoneShown = 0;
+  // Для наклона вычитаем ноль, который держит прошивка (кнопка ZERO) - тогда
+  // видно ровно то, что видит она, и подсветка мёртвой зоны совпадает.
+  // Для Yaw вычитать его НЕЛЬЗЯ: это калибровка наклона, к повороту
+  // отношения не имеет, и раньше из-за этого цифра выглядела бессмысленной.
+  // Yaw и так отсчитывается от нуля с момента выбора режима.
+  double get _phoneShownOut =>
+      _phoneTilt == 2 ? _phoneShown : _phoneShown - widget.state.wt901PitchZero;
+
+  // Нажатие пользователя: шлём команды на коробку и сразу применяем локально.
+  // Пока команды в пути, ответы коробки об СТАРОМ состоянии игнорируем - иначе
+  // они перебивали свежий выбор, и переключатель срабатывал лишь со второго
+  // раза (коробка отвечает статусом после первой из двух команд, где режим
+  // ещё выключен).
+  DateTime? _srcChangedAt;
+
+  void _setSource(RemoteSource src) {
+    _srcChangedAt = DateTime.now();
+    // Источник сообщаем коробке ЯВНО: режимы взаимоисключающие, иначе
+    // физический датчик и телефон пишут в одни переменные угла и мотор
+    // дёргается. Коробка этот выбор не сохраняет - он живёт, пока телефон
+    // подключён, и сбрасывается на WT901 при разрыве связи.
+    widget.bt.send('WT901_SRC=${src == RemoteSource.phone ? 1 : 0};');
+    final on = src != RemoteSource.off;
+    widget.state.wt901Enabled = on;
+    widget.state.wt901SrcPhone = src == RemoteSource.phone;
+    widget.bt.send('WT901_ENABLED=${on ? 1 : 0};');
+    _applySourceLocal(src, sendCommands: true);
+  }
+
+  // Применяет источник ТОЛЬКО локально (датчики, подписки), ничего не отправляя.
+  // Нужно и для нажатия, и когда коробка сама сменила режим - например,
+  // сбросила источник на WT901 при разрыве связи с телефоном.
+  // sendCommands=true только при нажатии пользователя. Когда режим сменила
+  // сама коробка, команды слать НЕЛЬЗЯ - получилось бы эхо ей же в ответ.
+  void _applySourceLocal(RemoteSource src, {bool sendCommands = false}) {
+    setState(() => _source = src);
+    _accelSub?.cancel(); _accelSub = null;
+    _gyroSub?.cancel(); _gyroSub = null;
+    _phoneSendTimer?.cancel(); _phoneSendTimer = null;
+    _phoneFiltInit = false;
+    _lastGyroUs = null;
+
+    final on = src != RemoteSource.off;
+    if (!on) { _stopScan(); _connectedMac = null; _connectedName = null; return; }
+
+    if (src == RemoteSource.wt901) {
+      // Возвращаем ось, которая была выбрана именно для пульта: телефон,
+      // пока был активен, перебил её на коробке своей (см. _applyPhoneAxis).
+      final axis = _wt901Axis;
+      if (sendCommands && axis != null) {
+        widget.state.wt901Axis = axis;
+        widget.bt.send('WT901_AXIS=$axis;');
+      }
+      return;
+    }
+
+    if (src == RemoteSource.phone) {
+      // Если для WT901 ось ещё не запоминали, берём текущую с коробки - её
+      // мы сейчас перебьём своей, и вернуть будет уже неоткуда.
+      _wt901Axis ??= widget.state.wt901Axis;
+      if (sendCommands) _applyPhoneAxis();
+
+      // Наклон считаем по вектору силы тяжести (акселерометр), а не
+      // гироскопом - тот копит дрейф. atan2 даёт диапазон ±90°.
+      // Сырые показания заметно дрожат, поэтому сглаживаем экспоненциальным
+      // фильтром: коэффициент подобран так, чтобы убрать дрожь, но не
+      // добавить ощутимой задержки на реальный наклон.
+      // Слияние акселерометра и гироскопа - то же, что делает BNO085 в режиме
+      // GAME_ROTATION_VECTOR (он тоже работает без магнитометра). Гироскоп
+      // даёт быструю и гладкую реакцию на движение, акселерометр не даёт
+      // ошибке накапливаться. Простое сглаживание одного акселерометра, что
+      // стояло раньше, убирало дрожь только ценой заметного запаздывания.
+      _accelSub = accelerometerEventStream().listen((e) {
+        // Вперёд-назад берём по оси Y, вбок - по X; в обоих случаях делим на
+        // длину оставшихся двух осей, чтобы угол не зависел от того, как
+        // сильно телефон повёрнут по другой оси.
+        _gx = e.x; _gy = e.y; _gz = e.z;
+        _phoneAccelAngle = _phoneTilt == 0
+            ? atan2(e.y, sqrt(e.x * e.x + e.z * e.z)) * 180 / pi
+            : atan2(-e.x, sqrt(e.y * e.y + e.z * e.z)) * 180 / pi;
+        if (!_phoneFiltInit && mounted) {
+          setState(() {
+            _phonePitch = _phoneAccelAngle;
+            _phoneShown = _phoneAccelAngle;
+            _phoneFiltInit = true;
+          });
+        }
+      });
+
+      _gyroSub = gyroscopeEventStream().listen((g) {
+        final nowUs = DateTime.now().microsecondsSinceEpoch;
+        final prev = _lastGyroUs;
+        _lastGyroUs = nowUs;
+        if (prev == null || !_phoneFiltInit || !mounted) return;
+        final dt = (nowUs - prev) / 1e6;
+        if (dt <= 0 || dt > 0.5) return;   // пропуск/зависание - не интегрируем
+
+        if (_phoneTilt == 2) {
+          // YAW: опоры вроде силы тяжести тут нет (гравитация вдоль этой оси
+          // не меняется), поэтому только интегрируем гироскоп - и угол будет
+          // медленно уползать, это неизбежно. Проекция вектора вращения на
+          // направление силы тяжести даёт скорость поворота вокруг вертикали
+          // мира, независимо от того, как держат телефон.
+          final gLen = sqrt(_gx * _gx + _gy * _gy + _gz * _gz);
+          if (gLen < 1) return;
+          final rate = (g.x * _gx + g.y * _gy + g.z * _gz) / gLen; // рад/с
+          setState(() {
+            _phoneYaw += rate * 180 / pi * dt;
+            if (_phoneYaw > 180) _phoneYaw -= 360;
+            if (_phoneYaw < -180) _phoneYaw += 360;
+            _phoneShown += 0.20 * (_phoneYaw - _phoneShown);
+          });
+          return;
+        }
+        // Знак ПЛЮС. Проверено по матрице поворота: при повороте телефона на
+        // угол θ вокруг оси X гравитация в его системе становится
+        // (0, g·sinθ, g·cosθ), то есть atan2(y, ...) даёт ровно +θ - и
+        // гироскоп по X меряет ту же +dθ/dt. То же для Y/roll. Раньше тут
+        // стоял минус: гироскоп тянул угол в обратную сторону, акселерометр
+        // его перетягивал назад, и это выглядело как сильный дрейф.
+        final rateDeg = (_phoneTilt == 0 ? g.x : g.y) * 180 / pi;
+        final byGyro = _phonePitch + rateDeg * dt;
+        setState(() {
+          // Вес гироскопа намеренно НЕ высокий. При 0.98 угол заметно плавал:
+          // у телефонного гироскопа есть смещение нуля, и оно успевает
+          // накопиться между редкими поправками. 0.90 - акселерометр держит
+          // угол жёстче (он не копит ошибку, гравитация всегда вниз), а
+          // гироскоп по-прежнему даёт гладкость и быструю реакцию.
+          _phonePitch = 0.90 * byGyro + 0.10 * _phoneAccelAngle;
+          // Экранное значение тянем к реальному чуть медленнее, чем меняется
+          // само - цифра спокойная, но без заметного запаздывания
+          _phoneShown += 0.20 * (_phonePitch - _phoneShown);
+        });
+      });
+      // Шлём каждые 100мс: на коробке данные устаревают через 400мс
+      // (WT901_TIMEOUT), запас четырёхкратный.
+      _phoneSendTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
+        if (_source != RemoteSource.phone) return;
+        if (_phoneTilt == 2) {
+          widget.bt.send('YAW=${_phoneYaw.toStringAsFixed(1)};');
+        } else {
+          widget.bt.send('PITCH=${_phonePitch.toStringAsFixed(1)};');
+        }
+      });
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -1092,6 +1335,7 @@ class _RemotePageState extends State<_RemotePage> {
     _speed2Val = widget.state.wt901Speed2.toDouble().clamp(1.0, 25.0);
     _syncConnectedFromState();
     widget.state.addListener(_onStateChange);
+    _loadAxisPrefs();   // запомненные оси для каждого источника
     if (!Platform.isIOS) _startScan();
   }
 
@@ -1129,6 +1373,24 @@ class _RemotePageState extends State<_RemotePage> {
     _speed2AngleVal = widget.state.wt901Speed2Angle.clamp(0.0, 90.0);
     _speed2Val = widget.state.wt901Speed2.toDouble().clamp(1.0, 25.0);
     _syncConnectedFromState();
+    // Ротатор мог сам выключить WT901 (физической кнопкой) - тогда возвращаем
+    // переключатель в "Выкл" и глушим отправку с телефона. Обратно в WT901 не
+    // переводим автоматически: какой именно источник нужен, знает только
+    // пользователь, а угадывать тут - значит неожиданно двинуть мотор.
+    // Положение переключателя ВЫВОДИМ из реального состояния коробки, а не
+    // держим отдельно: иначе при запуске приложения показывалось "Off", хотя
+    // WT901 работал, а коробка сама могла сменить режим (сброс источника при
+    // разрыве связи), и переключатель об этом не знал.
+    // Исключение - короткое окно после нажатия: там наши команды ещё в пути,
+    // и статус описывает прежнее состояние.
+    final justChanged = _srcChangedAt != null &&
+        DateTime.now().difference(_srcChangedAt!).inMilliseconds < 1500;
+    if (!justChanged) {
+      final derived = !widget.state.wt901Enabled
+          ? RemoteSource.off
+          : (widget.state.wt901SrcPhone ? RemoteSource.phone : RemoteSource.wt901);
+      if (derived != _source) _applySourceLocal(derived);
+    }
     if (mounted) setState(() {});
   }
 
@@ -1137,6 +1399,13 @@ class _RemotePageState extends State<_RemotePage> {
     widget.state.removeListener(_onStateChange);
     _scanSub?.cancel();
     FlutterBluePlus.stopScan();
+    _accelSub?.cancel();
+    _gyroSub?.cancel();
+    _phoneSendTimer?.cancel();
+    // Возвращаем экран в обычный режим - иначе блокировка поворота и запрет
+    // гаснуть остались бы висеть на всём приложении после ухода с этой страницы
+    SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+    WakelockPlus.disable();
     for (final c in _manualMacCtrls) { c.dispose(); }
     for (final f in _manualMacFocus) { f.dispose(); }
     super.dispose();
@@ -1205,12 +1474,51 @@ class _RemotePageState extends State<_RemotePage> {
     return 1;
   }
 
+  // Выбор, какой наклон САМОГО ТЕЛЕФОНА считать управляющим (см. комментарий
+  // в build() у блока Axis). На коробку в обоих случаях уходит одна и та же
+  // команда PITCH= - меняется только то, как мы считаем угол из акселерометра.
+  // Ось на коробке зависит от того, какой наклон телефона выбран:
+  //  Pitch/Roll -> ось 1: прошивка читает wt901Pitch, а его заполняет PITCH=
+  //                (подписи осей WT901 исторически перевёрнуты относительно
+  //                номеров, поэтому ставим номер явно, а не по названию)
+  //  Yaw        -> ось 2: включается штатное слежение за поворотом, данные
+  //                берутся из wt901Yaw, который заполняет YAW=
+  void _applyPhoneAxis() {
+    final axis = _phoneTilt == 2 ? 2 : 1;
+    widget.state.wt901Axis = axis;
+    widget.bt.send('WT901_AXIS=$axis;');
+  }
+
+  Widget _phoneTiltChip(String label, int tiltVal) {
+    final selected = _phoneTilt == tiltVal;
+    return ElevatedButton(
+      onPressed: () {
+        setState(() {
+          _phoneTilt = tiltVal;
+          _phoneFiltInit = false;
+          _phoneYaw = 0;          // новый отсчёт поворота
+          _applyPhoneAxis();
+        });
+        _saveAxisPrefs();
+      },
+      style: ElevatedButton.styleFrom(
+        backgroundColor: selected ? Colors.orange : Colors.grey.shade300,
+        foregroundColor: selected ? Colors.white : Colors.black,
+      ),
+      child: Text(label),
+    );
+  }
+
   Widget _axisChip(String label, int axisVal) {
     final s = widget.state;
     final bt = widget.bt;
     final selected = s.wt901Axis == axisVal;
     return ElevatedButton(
       onPressed: () {
+        // Запоминаем выбор именно для WT901: у телефона своя ось (_phoneTilt),
+        // и при переключении источников каждый должен вернуться к своей.
+        _wt901Axis = axisVal;
+        _saveAxisPrefs();
         setState(() => s.wt901Axis = axisVal);
         bt.send('WT901_AXIS=$axisVal;');
       },
@@ -1250,19 +1558,95 @@ class _RemotePageState extends State<_RemotePage> {
     return SingleChildScrollView(child: Column(children: [
       _pageTitle('Rod Remote'),
 
-      // Переключатель — всегда активен
+      // Источник управления: физический пульт WT901 / выключено / телефон.
+      // Все настройки ниже (мёртвая зона, обе скорости, ось, реверс, ноль)
+      // общие - ротатору всё равно, кто прислал угол: WT901 по своему BLE
+      // или телефон командой PITCH=. Поэтому источник выбирается тут, а
+      // настраивается всё одним и тем же набором полей.
       Container(
         margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(color: Colors.grey.shade200, borderRadius: BorderRadius.circular(12)),
-        child: _row('Enable remote:', Switch(
-          value: enabled,
-          onChanged: (v) {
-            setState(() => s.wt901Enabled = v);
-            bt.send('WT901_ENABLED=${v ? 1 : 0};');
-            if (!v) { _stopScan(); _connectedMac = null; _connectedName = null; }
-          },
-        )),
+        child: Column(children: [
+          const Text('Control source', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+          const SizedBox(height: 8),
+          SegmentedButton<RemoteSource>(
+            segments: const [
+              ButtonSegment(value: RemoteSource.wt901, label: Text('WT901'), icon: Icon(Icons.settings_remote)),
+              ButtonSegment(value: RemoteSource.off,   label: Text('Off'),   icon: Icon(Icons.power_settings_new)),
+              ButtonSegment(value: RemoteSource.phone, label: Text('Phone'), icon: Icon(Icons.smartphone)),
+            ],
+            selected: {_source},
+            onSelectionChanged: (sel) => _setSource(sel.first),
+            showSelectedIcon: false,
+            // В оранжевом стиле, как остальные активные элементы приложения
+            style: ButtonStyle(
+              backgroundColor: WidgetStateProperty.resolveWith((st) =>
+                  st.contains(WidgetState.selected) ? Colors.orange : Colors.grey.shade300),
+              foregroundColor: WidgetStateProperty.resolveWith((st) =>
+                  st.contains(WidgetState.selected) ? Colors.white : Colors.black),
+            ),
+          ),
+          if (_source == RemoteSource.phone) ...[
+            const SizedBox(height: 12),
+            Text(_phoneTilt == 2 ? 'rotation since Yaw selected' : 'tilt from center',
+                style: TextStyle(color: Colors.grey.shade600, fontSize: 12)),
+            // Целые градусы: десятые всё равно дрожат и читать их неудобно
+            Text('${_phoneShownOut.round()}°',
+                style: TextStyle(
+                  fontSize: 48, fontWeight: FontWeight.bold,
+                  color: _phoneTilt == 2
+                      ? Colors.orange
+                      : (_phoneShownOut.abs() < s.wt901DeadZone ? Colors.grey : Colors.orange),
+                )),
+            if (_phoneTilt != 2)
+              Text(
+                _phoneShownOut.abs() < s.wt901DeadZone
+                    ? 'in dead zone — motor stopped'
+                    : 'outside dead zone — motor runs',
+                style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
+              ),
+            const SizedBox(height: 6),
+            Text(
+              _phoneTilt == 2
+                  ? 'Yaw follows phone rotation. Works in OFF mode only.\n'
+                    'Gyro-only — it slowly drifts, re-select Yaw to reset.'
+                  : 'Use ZERO button below to set center.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
+            ),
+            const Divider(),
+            // Наклон телефона мешает его же системным функциям: вбок - ловится
+            // автоповорот и интерфейс переворачивается прямо во время работы,
+            // а погасший экран останавливает поток с датчиков.
+            SwitchListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              value: _lockRotation,
+              onChanged: (v) {
+                setState(() => _lockRotation = v);
+                _applyScreenPrefs();
+                _saveAxisPrefs();
+              },
+              title: const Text('Lock screen rotation', style: TextStyle(fontSize: 14)),
+              subtitle: const Text('tilting sideways will not flip the UI',
+                  style: TextStyle(fontSize: 12)),
+            ),
+            SwitchListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              value: _keepAwake,
+              onChanged: (v) {
+                setState(() => _keepAwake = v);
+                _applyScreenPrefs();
+                _saveAxisPrefs();
+              },
+              title: const Text('Keep screen on', style: TextStyle(fontSize: 14)),
+              subtitle: const Text('screen off stops sensor data',
+                  style: TextStyle(fontSize: 12)),
+            ),
+          ],
+        ]),
       ),
 
       // Всё остальное — неактивно если выключено
@@ -1285,6 +1669,22 @@ class _RemotePageState extends State<_RemotePage> {
               child: Column(children: [
                 const Text('Axis', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                 const SizedBox(height: 8),
+                // В режиме телефона выбор осей WT901 не подходит: их подписи
+                // намеренно перевёрнуты под ориентацию физического пульта, а
+                // телефон держат иначе. Плюс телефон шлёт угол одной командой
+                // PITCH=, поэтому ось на коробке всегда одна и та же (см.
+                // _setSource). Вместо этого даём выбрать, КАКОЙ наклон самого
+                // телефона считать управляющим. Yaw тут не предлагаем - для
+                // него нужен компас, а он плавает от помех.
+                if (_source == RemoteSource.phone)
+                  Row(children: [
+                    Expanded(child: _phoneTiltChip('Pitch', 0)),
+                    const SizedBox(width: 8),
+                    Expanded(child: _phoneTiltChip('Roll', 1)),
+                    const SizedBox(width: 8),
+                    Expanded(child: _phoneTiltChip('Yaw', 2)),
+                  ])
+                else
                 Row(children: [
                   Expanded(child: _axisChip('Roll', 1)),
                   const SizedBox(width: 8),
@@ -1314,7 +1714,9 @@ class _RemotePageState extends State<_RemotePage> {
               ]),
             ),
 
-            // Блок подключения WT901
+            // Блок подключения WT901 - в режиме "Телефон" не нужен вовсе:
+            // источник наклона тогда сам телефон, привязывать нечего.
+            if (_source != RemoteSource.phone)
             Container(
               margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               padding: const EdgeInsets.all(12),
