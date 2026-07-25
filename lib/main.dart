@@ -172,6 +172,19 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  // Ротатор присылает номер функции канала как есть - он приходит из его
+  // флеша (prefs) и нигде на той стороне не ограничивается диапазоном.
+  // Раньше тут было chOptions[int.parse(v)] с проверкой только на то, что
+  // строка вообще парсится в число: любое значение вне 0..5 (одна испорченная
+  // запись в NVS, прошивка другой версии) роняло RangeError прямо внутри
+  // обработчика BLE-потока, а вместе с ним и обновление всех остальных
+  // данных в приложении. Молча игнорируем некорректный номер.
+  void _setChFunction(int idx, String v) {
+    final i = int.tryParse(v);
+    if (i == null || i < 0 || i >= chOptions.length) return;
+    chFunctions[idx] = chOptions[i];
+  }
+
   void parseData(String data) {
     final parts = data.split(';');
     for (final part in parts) {
@@ -196,10 +209,10 @@ class AppState extends ChangeNotifier {
         case 'PEDAL_WIFI_REV': reverseWifi = v == '1';
         case 'PEDAL_MAC': pedalMac = v;
         case 'SEARCH_MSEC': searchMsec = int.tryParse(v) ?? searchMsec;
-        case 'CH_1': if (int.tryParse(v) != null) chFunctions[0] = chOptions[int.parse(v)];
-        case 'CH_2': if (int.tryParse(v) != null) chFunctions[1] = chOptions[int.parse(v)];
-        case 'CH_3': if (int.tryParse(v) != null) chFunctions[2] = chOptions[int.parse(v)];
-        case 'CH_4': if (int.tryParse(v) != null) chFunctions[3] = chOptions[int.parse(v)];
+        case 'CH_1': _setChFunction(0, v);
+        case 'CH_2': _setChFunction(1, v);
+        case 'CH_3': _setChFunction(2, v);
+        case 'CH_4': _setChFunction(3, v);
         case 'LIFT_FUNC': gyro6axis = v == '1';
         case 'LIFT_AXIS': liftAxisRoll = v == '1';
         case 'LIFT_UP': liftUp = int.tryParse(v) ?? liftUp;
