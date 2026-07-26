@@ -207,11 +207,16 @@ class AppState extends ChangeNotifier {
   void parseData(String data) {
     final parts = data.split(';');
     for (final part in parts) {
-      if (!part.contains('=')) continue;
-      final kv = part.split('=');
-      if (kv.length < 2) continue;
-      final k = kv[0].trim();
-      final v = kv[1].trim();
+      // Режем по ПЕРВОМУ '=', а не по всем. split('=') разваливал значение на
+      // куски и брал только первый: ссылка вида
+      // ".../ota.php?t=<токен>" превращалась в ".../ota.php?t" - токен
+      // отрезало вторым знаком равенства. Приложение показывало обрезанный
+      // адрес, а нажатие Update отправляло его обратно в коробку поверх
+      // правильного - сервер отвечал 404. То же ждало любой пароль с '='.
+      final eq = part.indexOf('=');
+      if (eq < 0) continue;
+      final k = part.substring(0, eq).trim();
+      final v = part.substring(eq + 1).trim();
       switch (k) {
         case 'MOTOR': motorDeg = double.tryParse(v) ?? motorDeg;
         case 'REDUCTION': reduction = double.tryParse(v) ?? reduction;
