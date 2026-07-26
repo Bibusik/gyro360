@@ -1178,7 +1178,14 @@ class _RemotePageState extends State<_RemotePage> {
   // конца: пара градусов в секунду - это уже пара оборотов за минуту. Поэтому
   // оцениваем его сами и вычитаем (стандартный приём zero-rate update).
   double _gyroBiasX = 0, _gyroBiasY = 0, _gyroBiasZ = 0;
-  int _gyroStillSamples = 0;
+  double _gyroStillSec = 0;
+
+  // Постоянная времени слияния, секунды: за столько акселерометр вытягивает
+  // угол обратно, если гироскоп ушёл. Задана именно ВО ВРЕМЕНИ, а не долей на
+  // отсчёт - иначе частота опроса датчиков молча меняла бы поведение фильтра
+  // (доля 0.10 на отсчёт при 5 Гц и при 50 Гц - это совершенно разная
+  // инерция). Значение подобрано на слух ещё при 5 Гц и сохранено как есть.
+  static const _phoneTauSec = 1.8;
 
   // Ноль НЕ считаем в приложении: этим занимается сама прошивка по кнопке
   // "ZERO CURRENT AXIS" (она запоминает текущий угол как центр и хранит его
@@ -1261,7 +1268,14 @@ class _RemotePageState extends State<_RemotePage> {
       // даёт быструю и гладкую реакцию на движение, акселерометр не даёт
       // ошибке накапливаться. Простое сглаживание одного акселерометра, что
       // стояло раньше, убирало дрожь только ценой заметного запаздывания.
-      _accelSub = accelerometerEventStream().listen((e) {
+      // 20мс вместо стандартных 200мс. При 5 Гц половина посылок на коробку
+      // просто повторяла предыдущее значение, а между отсчётами угол шагал
+      // рывками по целому десятку градусов, если телефон вели быстро.
+      // Перерисовывать экран 50 раз в секунду не нужно - показания и отправка
+      // идут по таймеру ниже, а здесь только считаем.
+      _accelSub = accelerometerEventStream(
+              samplingPeriod: SensorInterval.gameInterval)
+          .listen((e) {
         // Вперёд-назад берём по оси Y, вбок - по X; в обоих случаях делим на
         // длину оставшихся двух осей, чтобы угол не зависел от того, как
         // сильно телефон повёрнут по другой оси.
@@ -1269,16 +1283,16 @@ class _RemotePageState extends State<_RemotePage> {
         _phoneAccelAngle = _phoneTilt == 0
             ? atan2(e.y, sqrt(e.x * e.x + e.z * e.z)) * 180 / pi
             : atan2(-e.x, sqrt(e.y * e.y + e.z * e.z)) * 180 / pi;
-        if (!_phoneFiltInit && mounted) {
-          setState(() {
-            _phonePitch = _phoneAccelAngle;
-            _phoneShown = _phoneAccelAngle;
-            _phoneFiltInit = true;
-          });
+        if (!_phoneFiltInit) {
+          _phonePitch = _phoneAccelAngle;
+          _phoneShown = _phoneAccelAngle;
+          _phoneFiltInit = true;
         }
       });
 
-      _gyroSub = gyroscopeEventStream().listen((g) {
+      _gyroSub = gyroscopeEventStream(
+              samplingPeriod: SensorInterval.gameInterval)
+          .listen((g) {
         final nowUs = DateTime.now().microsecondsSinceEpoch;
         final prev = _lastGyroUs;
         _lastGyroUs = nowUs;
@@ -1295,11 +1309,13 @@ class _RemotePageState extends State<_RemotePage> {
         // бы за смещение и съела.
         final bx = g.x - _gyroBiasX, by = g.y - _gyroBiasY, bz = g.z - _gyroBiasZ;
         if (sqrt(bx * bx + by * by + bz * bz) < 0.06) {   // < ~3.4 °/с
-          final k = _gyroStillSamples < 10 ? 0.30 : 0.02;
+          // Скорости подстройки тоже во времени, а не на отсчёт: первую
+          // секунду неподвижности сходимся быстро, дальше - с постоянной 10с.
+          final k = (dt / (_gyroStillSec < 1.0 ? 0.3 : 10.0)).clamp(0.0, 1.0);
           _gyroBiasX += k * (g.x - _gyroBiasX);
           _gyroBiasY += k * (g.y - _gyroBiasY);
           _gyroBiasZ += k * (g.z - _gyroBiasZ);
-          _gyroStillSamples++;
+          _gyroStillSec += dt;
         }
         final gX = g.x - _gyroBiasX, gY = g.y - _gyroBiasY, gZ = g.z - _gyroBiasZ;
 
@@ -1316,12 +1332,9 @@ class _RemotePageState extends State<_RemotePage> {
           // Поэтому совсем медленное вращение считаем стоянием: повод повернуть
           // антенну - это осознанное движение, а не 0.5°/с.
           if (rate.abs() < 0.01) rate = 0;   // ~0.6 °/с
-          setState(() {
-            _phoneYaw += rate * 180 / pi * dt;
-            if (_phoneYaw > 180) _phoneYaw -= 360;
-            if (_phoneYaw < -180) _phoneYaw += 360;
-            _phoneShown += 0.20 * (_phoneYaw - _phoneShown);
-          });
+          _phoneYaw += rate * 180 / pi * dt;
+          if (_phoneYaw > 180) _phoneYaw -= 360;
+          if (_phoneYaw < -180) _phoneYaw += 360;
           return;
         }
         // Знак ПЛЮС. Проверено по матрице поворота: при повороте телефона на
@@ -1332,21 +1345,27 @@ class _RemotePageState extends State<_RemotePage> {
         // его перетягивал назад, и это выглядело как сильный дрейф.
         final rateDeg = (_phoneTilt == 0 ? gX : gY) * 180 / pi;
         final byGyro = _phonePitch + rateDeg * dt;
-        setState(() {
-          // Вес гироскопа намеренно НЕ высокий. При 0.98 угол заметно плавал:
-          // у телефонного гироскопа есть смещение нуля, и оно успевает
-          // накопиться между редкими поправками. 0.90 - акселерометр держит
-          // угол жёстче (он не копит ошибку, гравитация всегда вниз), а
-          // гироскоп по-прежнему даёт гладкость и быструю реакцию.
-          _phonePitch = 0.90 * byGyro + 0.10 * _phoneAccelAngle;
-          // Экранное значение тянем к реальному чуть медленнее, чем меняется
-          // само - цифра спокойная, но без заметного запаздывания
-          _phoneShown += 0.20 * (_phonePitch - _phoneShown);
-        });
+        // Акселерометр меряет гравитацию ПЛЮС собственное ускорение телефона.
+        // Пока его просто наклоняют, длина вектора держится около 9.8 и углу
+        // по нему можно верить. Стоит дёрнуть рукой - длина уезжает, и такой
+        // "угол" уже не про наклон: раньше он всё равно подмешивался, и
+        // резкое движение сбивало показания. Теперь на время рывка опираемся
+        // на гироскоп, а вернуть угол акселерометр успеет, когда рывок кончится.
+        final aLen = sqrt(_gx * _gx + _gy * _gy + _gz * _gz);
+        final trust = (1 - (aLen - 9.81).abs() / 2.0).clamp(0.0, 1.0);
+        final w = (1 - _phoneTauSec / (_phoneTauSec + dt)) * trust;
+        _phonePitch = (1 - w) * byGyro + w * _phoneAccelAngle;
       });
       // Шлём каждые 100мс: на коробке данные устаревают через 400мс
       // (WT901_TIMEOUT), запас четырёхкратный.
       _phoneSendTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
+        if (!mounted) return;
+        // Экранное значение тянем к настоящему отдельно и заметно медленнее:
+        // управлению нужна скорость, а глазу - спокойная цифра.
+        setState(() {
+          final target = _phoneTilt == 2 ? _phoneYaw : _phonePitch;
+          _phoneShown += 0.12 * (target - _phoneShown);
+        });
         if (_source != RemoteSource.phone) return;
         if (_phoneTilt == 2) {
           widget.bt.send('YAW=${_phoneYaw.toStringAsFixed(1)};');
