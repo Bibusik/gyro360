@@ -2170,6 +2170,10 @@ class _FirmwarePageState extends State<_FirmwarePage> {
   List<MapEntry<String, int>> _nets = [];
   bool _scanningWifi = false;
   bool _showPass = false;
+  // Что отправлено, но ещё не подтверждено ротатором - такие значения нельзя
+  // затирать приходящим статусом, он какое-то время несёт прежние (см.
+  // _onStateChange).
+  String? _ssidPending, _passPending, _urlPending;
 
   @override
   void initState() {
@@ -2179,9 +2183,9 @@ class _FirmwarePageState extends State<_FirmwarePage> {
     _url  = TextEditingController(text: widget.state.url);
     // Кнопки Send убраны — поля отправляют значение сами, как только
     // теряют фокус (тап в другое место/скрытие клавиатуры).
-    _ssidFocus.addListener(() { if (!_ssidFocus.hasFocus) widget.bt.send('SSID=${_ssid.text};'); });
-    _passFocus.addListener(() { if (!_passFocus.hasFocus) widget.bt.send('PASS=${_pass.text};'); });
-    _urlFocus.addListener(() { if (!_urlFocus.hasFocus) widget.bt.send('URL=${_url.text};'); });
+    _ssidFocus.addListener(() { if (!_ssidFocus.hasFocus) { _ssidPending = _ssid.text; widget.bt.send('SSID=${_ssid.text};'); } });
+    _passFocus.addListener(() { if (!_passFocus.hasFocus) { _passPending = _pass.text; widget.bt.send('PASS=${_pass.text};'); } });
+    _urlFocus.addListener(()  { if (!_urlFocus.hasFocus)  { _urlPending  = _url.text;  widget.bt.send('URL=${_url.text};'); } });
     widget.state.addListener(_onStateChange);
   }
 
@@ -2192,9 +2196,21 @@ class _FirmwarePageState extends State<_FirmwarePage> {
   // Не трогаем поле, если пользователь сейчас его редактирует.
   void _onStateChange() {
     final s = widget.state;
-    if (!_ssidFocus.hasFocus && _ssid.text != s.ssid) _ssid.text = s.ssid;
-    if (!_passFocus.hasFocus && _pass.text != s.pass) _pass.text = s.pass;
-    if (!_urlFocus.hasFocus  && _url.text  != s.url)  _url.text  = s.url;
+    // Отправленное значение считаем подтверждённым, только когда ротатор
+    // пришлёт его обратно.
+    if (_ssidPending == s.ssid) _ssidPending = null;
+    if (_passPending == s.pass) _passPending = null;
+    if (_urlPending  == s.url)  _urlPending  = null;
+
+    // Защиты "поле в фокусе" мало: поле отправляет значение, ТЕРЯЯ фокус, а
+    // ротатор ещё какое-то время шлёт статус со старым. Стоило перейти из
+    // URL в пароль - и только что введённый адрес молча заменялся прежним.
+    // Дальше Update уходил со старым адресом, и сервер отвечал 404. То же с
+    // паролем: набранный откатывался, поэтому и казалось, что подключиться
+    // можно только "поставив курсор" (то есть введя заново).
+    if (!_ssidFocus.hasFocus && _ssidPending == null && _ssid.text != s.ssid) _ssid.text = s.ssid;
+    if (!_passFocus.hasFocus && _passPending == null && _pass.text != s.pass) _pass.text = s.pass;
+    if (!_urlFocus.hasFocus  && _urlPending  == null && _url.text  != s.url)  _url.text  = s.url;
   }
 
   @override
