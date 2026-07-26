@@ -2073,16 +2073,22 @@ class _RemotePageState extends State<_RemotePage> {
                 // активным всегда один и тот же - подписанный Roll, - а Pitch
                 // оставался серым. Даём один переключатель на текущую ось
                 // телефона, со своим значением для Pitch и для Roll.
-                if (_source == RemoteSource.phone && _phoneTilt != 2)
-                  _row('Reverse', Switch(
-                    value: _phoneRev,
+                if (_source == RemoteSource.phone && _phoneTilt != 2) ...[
+                  _row('Reverse Pitch', Switch(
+                    value: _phoneRevPitch,
                     onChanged: (v) {
-                      setState(() {
-                        if (_phoneTilt == 0) { _phoneRevPitch = v; } else { _phoneRevRoll = v; }
-                      });
+                      setState(() => _phoneRevPitch = v);
                       _saveAxisPrefs();
                     },
-                  ))
+                  )),
+                  _row('Reverse Roll', Switch(
+                    value: _phoneRevRoll,
+                    onChanged: (v) {
+                      setState(() => _phoneRevRoll = v);
+                      _saveAxisPrefs();
+                    },
+                  )),
+                ]
                 else ...[
                   _axisReverseRow('Reverse Roll', 1, s.wt901PitchReverse, 'WT901_PITCH_REV', (v) => s.wt901PitchReverse = v),
                   _axisReverseRow('Reverse Pitch', 0, s.wt901RollReverse, 'WT901_ROLL_REV', (v) => s.wt901RollReverse = v),
