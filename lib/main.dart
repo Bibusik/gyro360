@@ -1671,16 +1671,17 @@ class _RemotePageState extends State<_RemotePage> {
                 const SizedBox(height: 8),
                 // В режиме телефона выбор осей WT901 не подходит: их подписи
                 // намеренно перевёрнуты под ориентацию физического пульта, а
-                // телефон держат иначе. Плюс телефон шлёт угол одной командой
-                // PITCH=, поэтому ось на коробке всегда одна и та же (см.
-                // _setSource). Вместо этого даём выбрать, КАКОЙ наклон самого
-                // телефона считать управляющим. Yaw тут не предлагаем - для
-                // него нужен компас, а он плавает от помех.
+                // телефон держат иначе. Вместо этого даём выбрать, КАКОЙ
+                // наклон самого телефона считать управляющим; ось на коробке
+                // подставляется автоматически (см. _applyPhoneAxis).
+                // Порядок кнопок тот же, что у WT901 (Roll/Pitch/Yaw), хотя
+                // значения за ними другие - чтобы при смене источника кнопки
+                // не прыгали местами.
                 if (_source == RemoteSource.phone)
                   Row(children: [
-                    Expanded(child: _phoneTiltChip('Pitch', 0)),
-                    const SizedBox(width: 8),
                     Expanded(child: _phoneTiltChip('Roll', 1)),
+                    const SizedBox(width: 8),
+                    Expanded(child: _phoneTiltChip('Pitch', 0)),
                     const SizedBox(width: 8),
                     Expanded(child: _phoneTiltChip('Yaw', 2)),
                   ])
