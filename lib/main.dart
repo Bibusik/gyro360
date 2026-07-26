@@ -2080,6 +2080,80 @@ class _RemotePageState extends State<_RemotePage> {
               ]),
             ),
 
+
+            // Настройки
+            Container(
+              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(color: Colors.grey.shade200, borderRadius: BorderRadius.circular(12)),
+              child: Column(children: [
+                const Text('Settings', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                if (s.wt901Axis == 2)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text('Yaw follows heading automatically — speed below is not used',
+                        style: TextStyle(color: Colors.grey.shade600, fontSize: 12, fontStyle: FontStyle.italic)),
+                  ),
+                const SizedBox(height: 8),
+                AnimatedOpacity(
+                  opacity: s.wt901Axis == 2 ? 0.35 : 1.0,
+                  duration: const Duration(milliseconds: 300),
+                  child: IgnorePointer(
+                    ignoring: s.wt901Axis == 2,
+                    child: Column(children: [
+                Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4), child: Column(children: [
+                  Row(children: [
+                    const Text('Dead zone (°):', style: TextStyle(fontSize: 16)),
+                    const Spacer(),
+                    Text('${_deadVal.round()}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                  ]),
+                  Slider(value: _deadVal, min: 0, max: 45, divisions: 45, activeColor: Colors.orange, allowedInteraction: SliderInteraction.slideThumb,
+                    onChanged: (v) => setState(() { _draggingSlider = true; _deadVal = v; }),
+                    onChangeEnd: (v) { _draggingSlider = false; s.wt901DeadZone = v; bt.send('WT901_DEAD=${v.toStringAsFixed(1)};'); }),
+                ])),
+                Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4), child: Column(children: [
+                  Row(children: [
+                    const Text('Speed (rpm):', style: TextStyle(fontSize: 16)),
+                    const Spacer(),
+                    Text('${_speedVal.round()}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                  ]),
+                  Slider(value: _speedVal, min: 1, max: 15, divisions: 14, activeColor: Colors.orange, allowedInteraction: SliderInteraction.slideThumb,
+                    onChanged: (v) => setState(() { _draggingSlider = true; _speedVal = v; }),
+                    onChangeEnd: (v) { _draggingSlider = false; s.wt901Speed = v.round(); bt.send('WT901_SPEED=${v.round()};'); }),
+                ])),
+                Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), child: _row('2nd speed:', Switch(
+                  value: s.wt901Speed2Enabled,
+                  onChanged: (v) {
+                    setState(() => s.wt901Speed2Enabled = v);
+                    bt.send('WT901_SPEED2_EN=${v ? 1 : 0};');
+                  },
+                ))),
+                Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4), child: Column(children: [
+                  Row(children: [
+                    const Text('2nd speed angle (°):', style: TextStyle(fontSize: 16)),
+                    const Spacer(),
+                    Text('${_speed2AngleVal.round()}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                  ]),
+                  Slider(value: _speed2AngleVal, min: 0, max: 90, divisions: 90, activeColor: Colors.orange, allowedInteraction: SliderInteraction.slideThumb,
+                    onChanged: (v) => setState(() { _draggingSlider = true; _speed2AngleVal = v; }),
+                    onChangeEnd: (v) { _draggingSlider = false; s.wt901Speed2Angle = v; bt.send('WT901_SPEED2_ANGLE=${v.toStringAsFixed(1)};'); }),
+                ])),
+                Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4), child: Column(children: [
+                  Row(children: [
+                    const Text('2nd speed (rpm):', style: TextStyle(fontSize: 16)),
+                    const Spacer(),
+                    Text('${_speed2Val.round()}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                  ]),
+                  Slider(value: _speed2Val, min: 1, max: 25, divisions: 24, activeColor: Colors.orange, allowedInteraction: SliderInteraction.slideThumb,
+                    onChanged: (v) => setState(() { _draggingSlider = true; _speed2Val = v; }),
+                    onChangeEnd: (v) { _draggingSlider = false; s.wt901Speed2 = v.round(); bt.send('WT901_SPEED2=${v.round()};'); }),
+                ])),
+                    ]),
+                  ),
+                ),
+              ]),
+            ),
+
             // Блок подключения WT901 - в режиме "Телефон" не нужен вовсе:
             // источник наклона тогда сам телефон, привязывать нечего.
             if (_source != RemoteSource.phone)
@@ -2243,79 +2317,6 @@ class _RemotePageState extends State<_RemotePage> {
                       );
                     }),
                 ],
-              ]),
-            ),
-
-            // Настройки
-            Container(
-              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(color: Colors.grey.shade200, borderRadius: BorderRadius.circular(12)),
-              child: Column(children: [
-                const Text('Settings', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                if (s.wt901Axis == 2)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 4),
-                    child: Text('Yaw follows heading automatically — speed below is not used',
-                        style: TextStyle(color: Colors.grey.shade600, fontSize: 12, fontStyle: FontStyle.italic)),
-                  ),
-                const SizedBox(height: 8),
-                AnimatedOpacity(
-                  opacity: s.wt901Axis == 2 ? 0.35 : 1.0,
-                  duration: const Duration(milliseconds: 300),
-                  child: IgnorePointer(
-                    ignoring: s.wt901Axis == 2,
-                    child: Column(children: [
-                Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4), child: Column(children: [
-                  Row(children: [
-                    const Text('Dead zone (°):', style: TextStyle(fontSize: 16)),
-                    const Spacer(),
-                    Text('${_deadVal.round()}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                  ]),
-                  Slider(value: _deadVal, min: 0, max: 45, divisions: 45, activeColor: Colors.orange, allowedInteraction: SliderInteraction.slideThumb,
-                    onChanged: (v) => setState(() { _draggingSlider = true; _deadVal = v; }),
-                    onChangeEnd: (v) { _draggingSlider = false; s.wt901DeadZone = v; bt.send('WT901_DEAD=${v.toStringAsFixed(1)};'); }),
-                ])),
-                Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4), child: Column(children: [
-                  Row(children: [
-                    const Text('Speed (rpm):', style: TextStyle(fontSize: 16)),
-                    const Spacer(),
-                    Text('${_speedVal.round()}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                  ]),
-                  Slider(value: _speedVal, min: 1, max: 15, divisions: 14, activeColor: Colors.orange, allowedInteraction: SliderInteraction.slideThumb,
-                    onChanged: (v) => setState(() { _draggingSlider = true; _speedVal = v; }),
-                    onChangeEnd: (v) { _draggingSlider = false; s.wt901Speed = v.round(); bt.send('WT901_SPEED=${v.round()};'); }),
-                ])),
-                Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), child: _row('2nd speed:', Switch(
-                  value: s.wt901Speed2Enabled,
-                  onChanged: (v) {
-                    setState(() => s.wt901Speed2Enabled = v);
-                    bt.send('WT901_SPEED2_EN=${v ? 1 : 0};');
-                  },
-                ))),
-                Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4), child: Column(children: [
-                  Row(children: [
-                    const Text('2nd speed angle (°):', style: TextStyle(fontSize: 16)),
-                    const Spacer(),
-                    Text('${_speed2AngleVal.round()}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                  ]),
-                  Slider(value: _speed2AngleVal, min: 0, max: 90, divisions: 90, activeColor: Colors.orange, allowedInteraction: SliderInteraction.slideThumb,
-                    onChanged: (v) => setState(() { _draggingSlider = true; _speed2AngleVal = v; }),
-                    onChangeEnd: (v) { _draggingSlider = false; s.wt901Speed2Angle = v; bt.send('WT901_SPEED2_ANGLE=${v.toStringAsFixed(1)};'); }),
-                ])),
-                Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4), child: Column(children: [
-                  Row(children: [
-                    const Text('2nd speed (rpm):', style: TextStyle(fontSize: 16)),
-                    const Spacer(),
-                    Text('${_speed2Val.round()}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                  ]),
-                  Slider(value: _speed2Val, min: 1, max: 25, divisions: 24, activeColor: Colors.orange, allowedInteraction: SliderInteraction.slideThumb,
-                    onChanged: (v) => setState(() { _draggingSlider = true; _speed2Val = v; }),
-                    onChangeEnd: (v) { _draggingSlider = false; s.wt901Speed2 = v.round(); bt.send('WT901_SPEED2=${v.round()};'); }),
-                ])),
-                    ]),
-                  ),
-                ),
               ]),
             ),
 
