@@ -1200,6 +1200,9 @@ class _RemotePageState extends State<_RemotePage> {
   final List<double> _qCompass = [0, 0, 0, 0];
   bool _haveCompass = false;
   double _compassYaw = 0;
+  // Опорная ориентация для наклона: от неё считается Pitch/Roll. null =
+  // системной ориентации нет, работает запасной расчёт по гравитации.
+  List<double>? _qTiltRef;
   // Подтягивать ли накопленный дрейф Yaw к системной ориентации (она слита с
   // магнитометром). По умолчанию ВЫКЛЮЧЕНО: ротатор - это металл с мотором,
   // поле рядом с ним искажено, и на практике чистый гироскоп ведёт себя
@@ -1228,8 +1231,12 @@ class _RemotePageState extends State<_RemotePage> {
   // Для Yaw вычитать его НЕЛЬЗЯ: это калибровка наклона, к повороту
   // отношения не имеет, и раньше из-за этого цифра выглядела бессмысленной.
   // Yaw и так отсчитывается от нуля с момента выбора режима.
+  // При счёте от опорного положения ноль уже наш собственный - вычитать ещё и
+  // прошивочный нельзя, цифра уехала бы на его величину.
   double get _phoneShownOut =>
-      _phoneTilt == 2 ? _phoneShown : _phoneShown - widget.state.wt901PitchZero;
+      (_phoneTilt == 2 || _qTiltRef != null)
+          ? _phoneShown
+          : _phoneShown - widget.state.wt901PitchZero;
 
   // Нажатие пользователя: шлём команды на коробку и сразу применяем локально.
   // Пока команды в пути, ответы коробки об СТАРОМ состоянии игнорируем - иначе
@@ -1264,6 +1271,9 @@ class _RemotePageState extends State<_RemotePage> {
     _motionSub?.cancel(); _motionSub = null;
     _phoneSendTimer?.cancel(); _phoneSendTimer = null;
     _haveAttitude = false;   // между сеансами разницу поворотов не считаем
+    // Опору наклона задаём заново при первом же отсчёте ориентации: положение
+    // телефона при входе в режим и есть его ноль (см. _feedAttitude).
+    _qTiltRef = null;
     _haveCompass = false;
     // Эталон ведём от текущего угла, а не от нуля: иначе при пересоздании
     // подписки появилось бы расхождение на весь накопленный поворот, и
@@ -1345,7 +1355,15 @@ class _RemotePageState extends State<_RemotePage> {
         if (_phoneTilt == 2) {
           widget.bt.send('YAW=${_phoneYaw.toStringAsFixed(1)};');
         } else {
-          widget.bt.send('PITCH=${_phonePitch.toStringAsFixed(1)};');
+          // Прошивка вычтет из присланного свой ноль (калибровка ZERO, общая с
+          // WT901). Когда мы считаем от собственной опоры, этот ноль надо
+          // компенсировать заранее - иначе он вычтется вторым и центр уедет.
+          // Так прошивку менять не пришлось и калибровка физического пульта
+          // осталась нетронутой.
+          final out = _qTiltRef != null
+              ? _phonePitch + widget.state.wt901PitchZero
+              : _phonePitch;
+          widget.bt.send('PITCH=${out.toStringAsFixed(1)};');
         }
       });
     }
@@ -1406,6 +1424,63 @@ class _RemotePageState extends State<_RemotePage> {
     return dYaw.abs() < 45 ? dYaw : 0;   // больше - сбой потока, пропускаем
   }
 
+  // Наклон как ПОВОРОТ ОТ ОПОРНОГО ПОЛОЖЕНИЯ, а не угол к горизонту.
+  //
+  // Угол к горизонту (atan2 по гравитации) живёт только в пределах ±90° и
+  // вырождается у краёв: у почти вертикального телефона знаменатель уходит к
+  // нулю, дрожание даёт скачки, и уже к 70° управлять нечем. Кнопка ZERO там
+  // не спасает - она сдвигает начало отсчёта, а не убирает вырождение.
+  //
+  // Здесь берём поворот, случившийся с момента опоры (Δq = q_тек ⊗ q_опор⁻¹),
+  // и проецируем его на ту мировую ось, вокруг которой этот наклон вращает.
+  // Ось берём из опорной ориентации: для Pitch это то, куда смотрела ось X
+  // телефона, для Roll - ось Y. Опорное положение может быть любым, хоть
+  // вертикальным, поэтому вырождения в рабочей точке нет.
+  //
+  // Возвращает градусы; 0 = телефон в опорном положении.
+  double _tiltFromRef(int tilt) {
+    final r = _qTiltRef;
+    if (r == null) return 0;
+    final rw = r[0], rx = r[1], ry = r[2], rz = r[3];
+    final w = _qMotion[0], x = _qMotion[1], y = _qMotion[2], z = _qMotion[3];
+
+    // Δq = q_тек ⊗ q_опор⁻¹ (обратный = сопряжённый у единичного).
+    var dw = w * rw + x * rx + y * ry + z * rz;
+    var dx = -w * rx + x * rw - y * rz + z * ry;
+    var dy = -w * ry + x * rz + y * rw - z * rx;
+    var dz = -w * rz - x * ry + y * rx + z * rw;
+    if (dw < 0) { dw = -dw; dx = -dx; dy = -dy; dz = -dz; }  // q и -q - один поворот
+
+    // Вектор поворота: направление - ось, длина - угол в радианах. В отличие
+    // от "удвоенной векторной части" это верно и на больших углах.
+    final vLen = sqrt(dx * dx + dy * dy + dz * dz);
+    if (vLen < 1e-9) return 0;
+    final ang = 2 * atan2(vLen, dw);
+    final kx = dx / vLen * ang, ky = dy / vLen * ang, kz = dz / vLen * ang;
+
+    // Куда смотрели оси телефона в опорном положении - это столбцы матрицы
+    // поворота опорного кватерниона.
+    final double ax, ay, az;
+    if (tilt == 0) {           // Pitch - вокруг оси X телефона
+      ax = 1 - 2 * (ry * ry + rz * rz);
+      ay = 2 * (rx * ry + rw * rz);
+      az = 2 * (rx * rz - rw * ry);
+    } else {                   // Roll - вокруг оси Y телефона
+      ax = 2 * (rx * ry - rw * rz);
+      ay = 1 - 2 * (rx * rx + rz * rz);
+      az = 2 * (ry * rz + rw * rx);
+    }
+    return (kx * ax + ky * ay + kz * az) * 180 / pi;
+  }
+
+  // Запомнить текущее положение как опорное (кнопка ZERO в режиме телефона,
+  // смена оси, вход в режим).
+  void _captureTiltRef() {
+    _qTiltRef = _haveAttitude ? List<double>.from(_qMotion) : null;
+    _phonePitch = 0;
+    _phoneShown = 0;
+  }
+
   // ОСНОВНОЙ источник поворота: ориентация, посчитанная системой БЕЗ
   // магнитометра (Android TYPE_GAME_ROTATION_VECTOR, iOS - рамка без
   // коррекции). Интегрировать гироскоп самим нельзя: мы видим его 50 раз в
@@ -1419,6 +1494,9 @@ class _RemotePageState extends State<_RemotePage> {
     }
     _qMotion[0] = w; _qMotion[1] = x; _qMotion[2] = y; _qMotion[3] = z;
     _haveAttitude = true;
+    // Первая же ориентация после входа в режим становится опорой для наклона:
+    // с какого положения начали, то и ноль.
+    _qTiltRef ??= [w, x, y, z];
   }
 
   // Эталон для медленной поправки: та же ориентация, но слитая с магнитометром.
@@ -1493,12 +1571,20 @@ class _RemotePageState extends State<_RemotePage> {
       _phoneYaw = _wrap180(_phoneYaw);
       return;
     }
-    // Знак ПЛЮС. Проверено по матрице поворота: при повороте телефона на угол
-    // θ вокруг оси X гравитация в его системе становится (0, g·sinθ, g·cosθ),
-    // то есть atan2(y, ...) даёт ровно +θ - и гироскоп по X меряет ту же
-    // +dθ/dt. То же для Y/roll. Раньше тут стоял минус: гироскоп тянул угол в
-    // обратную сторону, акселерометр его перетягивал назад, и это выглядело
-    // как сильный дрейф.
+    // Есть системная ориентация - считаем наклон от опорного положения: он не
+    // вырождается ни у какого хвата (см. _tiltFromRef). Фильтр гиро+акселерометр
+    // ниже нужен только запасному пути, тут сглаживать нечего.
+    if (_qTiltRef != null) {
+      _phonePitch = _tiltFromRef(_phoneTilt);
+      return;
+    }
+
+    // Запасной путь - угол к горизонту по гравитации. Знак ПЛЮС: проверено по
+    // матрице поворота, при повороте телефона на угол θ вокруг оси X гравитация
+    // в его системе становится (0, g·sinθ, g·cosθ), то есть atan2(y, ...) даёт
+    // ровно +θ - и гироскоп по X меряет ту же +dθ/dt. То же для Y/roll. Раньше
+    // тут стоял минус: гироскоп тянул угол в обратную сторону, акселерометр его
+    // перетягивал назад, и это выглядело как сильный дрейф.
     final rateDeg = (_phoneTilt == 0 ? gX : gY) * 180 / pi;
     final byGyro = _phonePitch + rateDeg * dt;
     // Через свой канал сюда приходит ЧИСТАЯ гравитация, её длина всегда 9.8 и
@@ -1690,6 +1776,7 @@ class _RemotePageState extends State<_RemotePage> {
           _phoneFiltInit = false;
           _phoneYaw = 0;          // новый отсчёт поворота
           _compassYaw = 0;        // эталон компаса ведём от той же точки
+          _captureTiltRef();      // и наклон - от нынешнего положения телефона
           _applyPhoneAxis();
         });
         _saveAxisPrefs();
@@ -1924,7 +2011,17 @@ class _RemotePageState extends State<_RemotePage> {
                   SizedBox(
                     width: double.infinity,
                     child: ElevatedButton.icon(
-                      onPressed: () => bt.send('WT901_ZERO=1;'),
+                      // В режиме телефона ноль - это ОПОРНОЕ ПОЛОЖЕНИЕ, от
+                      // которого считается наклон, и живёт оно в приложении.
+                      // Команду на коробку слать нельзя: её ноль общий с WT901,
+                      // и мы бы затёрли калибровку физического пульта.
+                      onPressed: () {
+                        if (_source == RemoteSource.phone && _haveAttitude) {
+                          setState(_captureTiltRef);
+                        } else {
+                          bt.send('WT901_ZERO=1;');
+                        }
+                      },
                       icon: const Icon(Icons.adjust),
                       label: const Text('ZERO CURRENT AXIS', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                       style: ElevatedButton.styleFrom(
