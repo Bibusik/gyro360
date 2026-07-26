@@ -2169,6 +2169,7 @@ class _FirmwarePageState extends State<_FirmwarePage> {
   StreamSubscription<List<WiFiAccessPoint>>? _wifiSub;
   List<MapEntry<String, int>> _nets = [];
   bool _scanningWifi = false;
+  bool _showPass = false;
 
   @override
   void initState() {
@@ -2247,7 +2248,7 @@ class _FirmwarePageState extends State<_FirmwarePage> {
     return SingleChildScrollView(child: Column(children: [
       _pageTitle('Firmware page'),
       _fieldRow('AP name:', _ssid, _ssidFocus),
-      _fieldRow('Password:', _pass, _passFocus, obscure: true),
+      _fieldRow('Password:', _pass, _passFocus, obscure: !_showPass),
       _fieldRow('Server URL:', _url, _urlFocus),
       Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
@@ -2311,10 +2312,28 @@ class _FirmwarePageState extends State<_FirmwarePage> {
         Expanded(flex: 3, child: TextField(
           controller: ctrl, obscureText: obscure, focusNode: focusNode,
           onSubmitted: (_) => focusNode.unfocus(),
-          decoration: InputDecoration(filled: true, fillColor: Colors.yellow, border: OutlineInputBorder(borderRadius: BorderRadius.circular(4)), contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), isDense: true),
+          decoration: InputDecoration(
+            filled: true, fillColor: Colors.yellow,
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(4)),
+            contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            isDense: true,
+            // Ротатор присылает сохранённый пароль обратно, и под точками не
+            // видно, что именно там лежит: свой пароль, заводской "gyro360"
+            // или обрезанный остаток. Пока посмотреть было нельзя, оставалось
+            // только вводить заново вслепую.
+            suffixIcon: !_isPassField(ctrl) ? null : IconButton(
+              icon: Icon(_showPass ? Icons.visibility_off : Icons.visibility, size: 20),
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+              tooltip: _showPass ? 'Hide password' : 'Show password',
+              onPressed: () => setState(() => _showPass = !_showPass),
+            ),
+          ),
           style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
         )),
       ]),
     );
   }
+
+  bool _isPassField(TextEditingController ctrl) => identical(ctrl, _pass);
 }
