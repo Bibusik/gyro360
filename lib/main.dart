@@ -1413,6 +1413,22 @@ class _RemotePageState extends State<_RemotePage> {
     }
   }
 
+  // Компактная строка-переключатель: три штуки подряд обычными SwitchListTile
+  // с подписями занимали пол-экрана. Пояснения убраны в сам заголовок, высота
+  // строки минимальная.
+  Widget _miniSwitch(String label, bool value, void Function(bool) onChanged) {
+    return SizedBox(
+      height: 34,
+      child: Row(children: [
+        Expanded(child: Text(label, style: const TextStyle(fontSize: 13))),
+        Transform.scale(
+          scale: 0.75,
+          child: Switch(value: value, onChanged: onChanged),
+        ),
+      ]),
+    );
+  }
+
   static double _wrap180(double deg) {
     if (deg > 180) return deg - 360;
     if (deg < -180) return deg + 360;
@@ -1844,25 +1860,6 @@ class _RemotePageState extends State<_RemotePage> {
     );
   }
 
-  Widget _axisReverseRow(String label, int axisVal, bool value, String cmd, void Function(bool) setter) {
-    final s = widget.state;
-    final bt = widget.bt;
-    final active = s.wt901Axis == axisVal;
-    return Opacity(
-      opacity: active ? 1.0 : 0.4,
-      child: IgnorePointer(
-        ignoring: !active,
-        child: _row(label, Switch(
-          value: value,
-          onChanged: (v) {
-            setState(() => setter(v));
-            bt.send('$cmd=${v ? 1 : 0};');
-          },
-        )),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final s = widget.state;
@@ -1902,96 +1899,39 @@ class _RemotePageState extends State<_RemotePage> {
             ),
           ),
           if (_source == RemoteSource.phone) ...[
-            const SizedBox(height: 12),
-            Text(_phoneTilt == 2 ? 'rotation since Yaw selected' : 'tilt from center',
-                style: TextStyle(color: Colors.grey.shade600, fontSize: 12)),
-            // Целые градусы: десятые всё равно дрожат и читать их неудобно
-            Text('${_phoneShownOut.round()}°',
-                style: TextStyle(
-                  fontSize: 48, fontWeight: FontWeight.bold,
-                  color: _phoneTilt == 2
-                      ? Colors.orange
-                      : (_phoneShownOut.abs() < s.wt901DeadZone ? Colors.grey : Colors.orange),
-                )),
-            if (_phoneTilt != 2)
-              Text(
-                _phoneShownOut.abs() < s.wt901DeadZone
-                    ? 'in dead zone — motor stopped'
-                    : 'outside dead zone — motor runs',
-                style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
-              ),
-            const SizedBox(height: 6),
-            Text(
-              _phoneTilt == 2
-                  ? _useCompass
-                      ? 'Yaw follows phone rotation. Works in OFF mode only.'
-                      : 'Yaw follows phone rotation. Works in OFF mode only.\n'
-                        'Gyro-only — it slowly drifts, re-select Yaw to reset.'
-                  : 'Use ZERO button below to set center.',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
-            ),
             const Divider(),
             // Поворот вокруг вертикали не на что опереть, кроме магнитометра -
             // без него остаток смещения гироскопа копится и Yaw уползает. Но
             // рядом с ротатором железа и мотор, поле там искажено, поэтому
             // компас должно быть можно выключить и вернуться к гироскопу.
-            SwitchListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              value: _useCompass,
-              onChanged: (v) {
-                setState(() {
-                  _useCompass = v;
-                  // Начинаем эталон от текущего угла, иначе накопленное за
-                  // время выключения расхождение поехало бы выбираться
-                  // поправкой.
-                  _compassYaw = _phoneYaw;
-                  _haveCompass = false;
-                });
-                _saveAxisPrefs();
-                // Пересоздаём подписку: набор датчиков зависит от флага.
-                if (_source == RemoteSource.phone) {
-                  _applySourceLocal(RemoteSource.phone);
-                }
-              },
-              title: const Text('Compass correction for Yaw',
-                  style: TextStyle(fontSize: 14)),
-              subtitle: Text(
-                  _useCompass
-                      ? 'trims gyro drift while the phone rests'
-                      : 'gyro only — drifts, but immune to metal',
-                  style: const TextStyle(fontSize: 12)),
-            ),
+            _miniSwitch('Compass correction for Yaw', _useCompass, (v) {
+              setState(() {
+                _useCompass = v;
+                // Начинаем эталон от текущего угла, иначе накопленное за
+                // время выключения расхождение поехало бы выбираться
+                // поправкой.
+                _compassYaw = _phoneYaw;
+                _haveCompass = false;
+              });
+              _saveAxisPrefs();
+              // Пересоздаём подписку: набор датчиков зависит от флага.
+              if (_source == RemoteSource.phone) {
+                _applySourceLocal(RemoteSource.phone);
+              }
+            }),
             // Наклон телефона мешает его же системным функциям: вбок - ловится
             // автоповорот и интерфейс переворачивается прямо во время работы,
             // а погасший экран останавливает поток с датчиков.
-            SwitchListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              value: _lockRotation,
-              onChanged: (v) {
-                setState(() => _lockRotation = v);
-                _applyScreenPrefs();
-                _saveAxisPrefs();
-              },
-              title: const Text('Lock screen rotation', style: TextStyle(fontSize: 14)),
-              subtitle: const Text('tilting sideways will not flip the UI',
-                  style: TextStyle(fontSize: 12)),
-            ),
-            SwitchListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              value: _keepAwake,
-              onChanged: (v) {
-                setState(() => _keepAwake = v);
-                _applyScreenPrefs();
-                _saveAxisPrefs();
-              },
-              title: const Text('Keep screen on', style: TextStyle(fontSize: 14)),
-              subtitle: const Text('screen off stops sensor data',
-                  style: TextStyle(fontSize: 12)),
-            ),
+            _miniSwitch('Lock screen rotation', _lockRotation, (v) {
+              setState(() => _lockRotation = v);
+              _applyScreenPrefs();
+              _saveAxisPrefs();
+            }),
+            _miniSwitch('Keep screen on', _keepAwake, (v) {
+              setState(() => _keepAwake = v);
+              _applyScreenPrefs();
+              _saveAxisPrefs();
+            }),
           ],
         ]),
       ),
@@ -2065,35 +2005,74 @@ class _RemotePageState extends State<_RemotePage> {
                       ),
                     ),
                   ),
+                // Показания живут здесь, под кнопкой нуля, а не в блоке выбора
+                // источника: смотрят на них, когда уже выбрана ось и задан
+                // ноль, а наверху они только отодвигали всё остальное вниз.
+                if (_source == RemoteSource.phone) ...[
+                  const SizedBox(height: 8),
+                  Text(_phoneTilt == 2 ? 'rotation since Yaw selected' : 'tilt from center',
+                      style: TextStyle(color: Colors.grey.shade600, fontSize: 12)),
+                  // Целые градусы: десятые всё равно дрожат и читать их неудобно
+                  Text('${_phoneShownOut.round()}°',
+                      style: TextStyle(
+                        fontSize: 48, fontWeight: FontWeight.bold,
+                        color: _phoneTilt == 2
+                            ? Colors.orange
+                            : (_phoneShownOut.abs() < s.wt901DeadZone ? Colors.grey : Colors.orange),
+                      )),
+                  if (_phoneTilt != 2)
+                    Text(
+                      _phoneShownOut.abs() < s.wt901DeadZone
+                          ? 'in dead zone — motor stopped'
+                          : 'outside dead zone — motor runs',
+                      style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
+                    )
+                  else
+                    Text(
+                      _useCompass
+                          ? 'Works in OFF mode only.'
+                          : 'Works in OFF mode only. Gyro-only — re-select Yaw to reset.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
+                    ),
+                ],
                 const SizedBox(height: 8),
-                // У телефона своя ось (Pitch/Roll/Yaw), и она НЕ совпадает с
-                // осью, которую видит коробка: наклон в обоих случаях уходит
-                // одной и той же командой PITCH=, то есть на коробке всегда
-                // ось 1. Поэтому три "осевых" переключателя тут показывали
-                // активным всегда один и тот же - подписанный Roll, - а Pitch
-                // оставался серым. Даём один переключатель на текущую ось
-                // телефона, со своим значением для Pitch и для Roll.
-                if (_source == RemoteSource.phone && _phoneTilt != 2) ...[
+                // Показываем реверс ТОЛЬКО для выбранной оси: три строки, из
+                // которых две всегда неактивны, зря растягивали страницу.
+                // У телефона своя ось и свой реверс (наклон в любом случае
+                // уходит командой PITCH=, то есть на коробке всегда ось 1 -
+                // осевые переключатели WT901 к нему неприменимы).
+                if (_source == RemoteSource.phone && _phoneTilt == 0)
                   _row('Reverse Pitch', Switch(
                     value: _phoneRevPitch,
                     onChanged: (v) {
                       setState(() => _phoneRevPitch = v);
                       _saveAxisPrefs();
                     },
-                  )),
+                  ))
+                else if (_source == RemoteSource.phone && _phoneTilt == 1)
                   _row('Reverse Roll', Switch(
                     value: _phoneRevRoll,
                     onChanged: (v) {
                       setState(() => _phoneRevRoll = v);
                       _saveAxisPrefs();
                     },
+                  ))
+                else if (s.wt901Axis == 1)
+                  _row('Reverse Roll', Switch(
+                    value: s.wt901PitchReverse,
+                    onChanged: (v) { setState(() => s.wt901PitchReverse = v); bt.send('WT901_PITCH_REV=${v ? 1 : 0};'); },
+                  ))
+                else if (s.wt901Axis == 0)
+                  _row('Reverse Pitch', Switch(
+                    value: s.wt901RollReverse,
+                    onChanged: (v) { setState(() => s.wt901RollReverse = v); bt.send('WT901_ROLL_REV=${v ? 1 : 0};'); },
+                  ))
+                else
+                  _row('Reverse Yaw', Switch(
+                    value: s.wt901YawReverse,
+                    onChanged: (v) { setState(() => s.wt901YawReverse = v); bt.send('WT901_YAW_REV=${v ? 1 : 0};'); },
                   )),
-                ]
-                else ...[
-                  _axisReverseRow('Reverse Roll', 1, s.wt901PitchReverse, 'WT901_PITCH_REV', (v) => s.wt901PitchReverse = v),
-                  _axisReverseRow('Reverse Pitch', 0, s.wt901RollReverse, 'WT901_ROLL_REV', (v) => s.wt901RollReverse = v),
-                  _axisReverseRow('Reverse Yaw', 2, s.wt901YawReverse, 'WT901_YAW_REV', (v) => s.wt901YawReverse = v),
-                ],
               ]),
             ),
 
