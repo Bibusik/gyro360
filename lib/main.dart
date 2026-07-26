@@ -1135,6 +1135,8 @@ class _RemotePageState extends State<_RemotePage> {
   static const _kPrefLockRot   = 'lockRotation';
   static const _kPrefKeepAwake = 'keepAwake';
   static const _kPrefUseCompass = 'useCompassForYaw';
+  static const _kPrefRevPitch  = 'phoneRevPitch';
+  static const _kPrefRevRoll   = 'phoneRevRoll';
 
   // Управление наклоном телефона конфликтует с его же системными функциями:
   // наклон вбок вызывает автоповорот экрана (интерфейс переворачивается прямо
@@ -1159,6 +1161,8 @@ class _RemotePageState extends State<_RemotePage> {
       _lockRotation = p.getBool(_kPrefLockRot) ?? _lockRotation;
       _keepAwake = p.getBool(_kPrefKeepAwake) ?? _keepAwake;
       _useCompass = p.getBool(_kPrefUseCompass) ?? _useCompass;
+      _phoneRevPitch = p.getBool(_kPrefRevPitch) ?? _phoneRevPitch;
+      _phoneRevRoll  = p.getBool(_kPrefRevRoll)  ?? _phoneRevRoll;
     });
     _applyScreenPrefs();
   }
@@ -1169,6 +1173,8 @@ class _RemotePageState extends State<_RemotePage> {
     await p.setBool(_kPrefLockRot, _lockRotation);
     await p.setBool(_kPrefKeepAwake, _keepAwake);
     await p.setBool(_kPrefUseCompass, _useCompass);
+    await p.setBool(_kPrefRevPitch, _phoneRevPitch);
+    await p.setBool(_kPrefRevRoll,  _phoneRevRoll);
     final a = _wt901Axis;
     if (a != null) await p.setInt(_kPrefWt901Axis, a);
   }
@@ -1203,6 +1209,11 @@ class _RemotePageState extends State<_RemotePage> {
   // Опорная ориентация для наклона: от неё считается Pitch/Roll. null =
   // системной ориентации нет, работает запасной расчёт по гравитации.
   List<double>? _qTiltRef;
+  // Реверс для наклона с телефона - СВОЙ для каждой оси и свой, отдельный от
+  // реверса WT901: у коробки он один на ось 1, а телефон шлёт туда и Pitch, и
+  // Roll. Применяем его сами, чтобы не трогать настройку физического пульта.
+  bool _phoneRevPitch = false, _phoneRevRoll = false;
+  bool get _phoneRev => _phoneTilt == 0 ? _phoneRevPitch : _phoneRevRoll;
   // Подтягивать ли накопленный дрейф Yaw к системной ориентации (она слита с
   // магнитометром). По умолчанию ВЫКЛЮЧЕНО: ротатор - это металл с мотором,
   // поле рядом с ним искажено, и на практике чистый гироскоп ведёт себя
@@ -1360,8 +1371,13 @@ class _RemotePageState extends State<_RemotePage> {
           // компенсировать заранее - иначе он вычтется вторым и центр уедет.
           // Так прошивку менять не пришлось и калибровка физического пульта
           // осталась нетронутой.
+          // Реверс телефона применяем сами, а реверс коробки компенсируем: она
+          // считает raw = присланное - ноль, и при своём реверсе меняет знак.
+          // Чтобы на выходе получилось ровно наше значение, шлём с учётом обоих.
+          final d = _phoneRev ? -_phonePitch : _phonePitch;
           final out = _qTiltRef != null
-              ? _phonePitch + widget.state.wt901PitchZero
+              ? widget.state.wt901PitchZero +
+                  (widget.state.wt901PitchReverse ? -d : d)
               : _phonePitch;
           widget.bt.send('PITCH=${out.toStringAsFixed(1)};');
         }
@@ -2050,9 +2066,28 @@ class _RemotePageState extends State<_RemotePage> {
                     ),
                   ),
                 const SizedBox(height: 8),
-                _axisReverseRow('Reverse Roll', 1, s.wt901PitchReverse, 'WT901_PITCH_REV', (v) => s.wt901PitchReverse = v),
-                _axisReverseRow('Reverse Pitch', 0, s.wt901RollReverse, 'WT901_ROLL_REV', (v) => s.wt901RollReverse = v),
-                _axisReverseRow('Reverse Yaw', 2, s.wt901YawReverse, 'WT901_YAW_REV', (v) => s.wt901YawReverse = v),
+                // У телефона своя ось (Pitch/Roll/Yaw), и она НЕ совпадает с
+                // осью, которую видит коробка: наклон в обоих случаях уходит
+                // одной и той же командой PITCH=, то есть на коробке всегда
+                // ось 1. Поэтому три "осевых" переключателя тут показывали
+                // активным всегда один и тот же - подписанный Roll, - а Pitch
+                // оставался серым. Даём один переключатель на текущую ось
+                // телефона, со своим значением для Pitch и для Roll.
+                if (_source == RemoteSource.phone && _phoneTilt != 2)
+                  _row('Reverse', Switch(
+                    value: _phoneRev,
+                    onChanged: (v) {
+                      setState(() {
+                        if (_phoneTilt == 0) { _phoneRevPitch = v; } else { _phoneRevRoll = v; }
+                      });
+                      _saveAxisPrefs();
+                    },
+                  ))
+                else ...[
+                  _axisReverseRow('Reverse Roll', 1, s.wt901PitchReverse, 'WT901_PITCH_REV', (v) => s.wt901PitchReverse = v),
+                  _axisReverseRow('Reverse Pitch', 0, s.wt901RollReverse, 'WT901_ROLL_REV', (v) => s.wt901RollReverse = v),
+                  _axisReverseRow('Reverse Yaw', 2, s.wt901YawReverse, 'WT901_YAW_REV', (v) => s.wt901YawReverse = v),
+                ],
               ]),
             ),
 
