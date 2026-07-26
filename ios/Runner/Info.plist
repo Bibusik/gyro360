@@ -30,6 +30,8 @@
 	<string>Приложению нужен Bluetooth для подключения к ротатору GYRO360 и датчику Rod Remote (WT901).</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>Приложению нужен Bluetooth для подключения к ротатору GYRO360 и датчику Rod Remote (WT901).</string>
+	<key>NSMotionUsageDescription</key>
+	<string>Приложению нужны датчики движения, чтобы управлять ротатором наклоном и поворотом самого телефона (режим Phone на странице Rod Remote).</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
