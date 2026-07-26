@@ -1163,6 +1163,10 @@ class _RemotePageState extends State<_RemotePage> {
     if (a != null) await p.setInt(_kPrefWt901Axis, a);
   }
   StreamSubscription<GyroscopeEvent>? _gyroSub;
+  // Свой канал к системным датчикам - см. android/.../MainActivity.kt и
+  // ios/Runner/MotionChannel.swift. Даёт то, чего sensors_plus не отдаёт.
+  static const _motionChannel = EventChannel('gyro360/motion');
+  StreamSubscription? _motionSub;
   int? _lastGyroUs;
   // Последний вектор силы тяжести (из акселерометра). Нужен для Yaw: чтобы
   // поворот считался вокруг ВЕРТИКАЛИ МИРА, а не вокруг оси телефона -
@@ -1234,6 +1238,7 @@ class _RemotePageState extends State<_RemotePage> {
     setState(() => _source = src);
     _accelSub?.cancel(); _accelSub = null;
     _gyroSub?.cancel(); _gyroSub = null;
+    _motionSub?.cancel(); _motionSub = null;
     _phoneSendTimer?.cancel(); _phoneSendTimer = null;
     _phoneFiltInit = false;
     _lastGyroUs = null;
@@ -1273,89 +1278,22 @@ class _RemotePageState extends State<_RemotePage> {
       // рывками по целому десятку градусов, если телефон вели быстро.
       // Перерисовывать экран 50 раз в секунду не нужно - показания и отправка
       // идут по таймеру ниже, а здесь только считаем.
-      _accelSub = accelerometerEventStream(
-              samplingPeriod: SensorInterval.gameInterval)
-          .listen((e) {
-        // Вперёд-назад берём по оси Y, вбок - по X; в обоих случаях делим на
-        // длину оставшихся двух осей, чтобы угол не зависел от того, как
-        // сильно телефон повёрнут по другой оси.
-        _gx = e.x; _gy = e.y; _gz = e.z;
-        _phoneAccelAngle = _phoneTilt == 0
-            ? atan2(e.y, sqrt(e.x * e.x + e.z * e.z)) * 180 / pi
-            : atan2(-e.x, sqrt(e.y * e.y + e.z * e.z)) * 180 / pi;
-        if (!_phoneFiltInit) {
-          _phonePitch = _phoneAccelAngle;
-          _phoneShown = _phoneAccelAngle;
-          _phoneFiltInit = true;
-        }
+      // Датчики берём своим каналом (android MainActivity.kt / iOS
+      // MotionChannel.swift): системе доступно то, чего sensors_plus не отдаёт -
+      // очищенная от ускорения руки гравитация, а на iOS ещё и гироскоп с
+      // вычтенным смещением нуля. Если канал по какой-то причине не отвечает,
+      // откатываемся на сырые датчики: хуже, но работает.
+      _motionSub = _motionChannel.receiveBroadcastStream().listen((ev) {
+        final v = (ev as List).cast<double>();
+        _feedGravity(v[0], v[1], v[2]);
+        _feedGyro(v[3], v[4], v[5]);
+      }, onError: (_) {
+        if (_motionSub == null) return;   // подписку уже сняли - это не сбой
+        _motionSub?.cancel();
+        _motionSub = null;
+        _startRawSensors();
       });
 
-      _gyroSub = gyroscopeEventStream(
-              samplingPeriod: SensorInterval.gameInterval)
-          .listen((g) {
-        final nowUs = DateTime.now().microsecondsSinceEpoch;
-        final prev = _lastGyroUs;
-        _lastGyroUs = nowUs;
-        if (prev == null || !_phoneFiltInit || !mounted) return;
-        final dt = (nowUs - prev) / 1e6;
-        if (dt <= 0 || dt > 0.5) return;   // пропуск/зависание - не интегрируем
-
-        // Оценка смещения нуля. Когда телефон почти неподвижен, всё, что
-        // показывает гироскоп - это и есть смещение, так что подтягиваем к
-        // нему оценку. Первые отсчёты берём крупным шагом (иначе после
-        // запуска Yaw уползал бы, пока оценка сходится), дальше - мелким:
-        // само смещение меняется медленно, от прогрева и температуры, а вот
-        // медленный НАМЕРЕННЫЙ поворот при быстрой подстройке оценка приняла
-        // бы за смещение и съела.
-        final bx = g.x - _gyroBiasX, by = g.y - _gyroBiasY, bz = g.z - _gyroBiasZ;
-        if (sqrt(bx * bx + by * by + bz * bz) < 0.06) {   // < ~3.4 °/с
-          // Скорости подстройки тоже во времени, а не на отсчёт: первую
-          // секунду неподвижности сходимся быстро, дальше - с постоянной 10с.
-          final k = (dt / (_gyroStillSec < 1.0 ? 0.3 : 10.0)).clamp(0.0, 1.0);
-          _gyroBiasX += k * (g.x - _gyroBiasX);
-          _gyroBiasY += k * (g.y - _gyroBiasY);
-          _gyroBiasZ += k * (g.z - _gyroBiasZ);
-          _gyroStillSec += dt;
-        }
-        final gX = g.x - _gyroBiasX, gY = g.y - _gyroBiasY, gZ = g.z - _gyroBiasZ;
-
-        if (_phoneTilt == 2) {
-          // YAW: опоры вроде силы тяжести тут нет (гравитация вдоль этой оси
-          // не меняется), поэтому только интегрируем гироскоп - и угол будет
-          // медленно уползать, это неизбежно. Проекция вектора вращения на
-          // направление силы тяжести даёт скорость поворота вокруг вертикали
-          // мира, независимо от того, как держат телефон.
-          final gLen = sqrt(_gx * _gx + _gy * _gy + _gz * _gz);
-          if (gLen < 1) return;
-          double rate = (gX * _gx + gY * _gy + gZ * _gz) / gLen; // рад/с
-          // Оценка смещения не бывает идеальной, а остаток всё равно копится.
-          // Поэтому совсем медленное вращение считаем стоянием: повод повернуть
-          // антенну - это осознанное движение, а не 0.5°/с.
-          if (rate.abs() < 0.01) rate = 0;   // ~0.6 °/с
-          _phoneYaw += rate * 180 / pi * dt;
-          if (_phoneYaw > 180) _phoneYaw -= 360;
-          if (_phoneYaw < -180) _phoneYaw += 360;
-          return;
-        }
-        // Знак ПЛЮС. Проверено по матрице поворота: при повороте телефона на
-        // угол θ вокруг оси X гравитация в его системе становится
-        // (0, g·sinθ, g·cosθ), то есть atan2(y, ...) даёт ровно +θ - и
-        // гироскоп по X меряет ту же +dθ/dt. То же для Y/roll. Раньше тут
-        // стоял минус: гироскоп тянул угол в обратную сторону, акселерометр
-        // его перетягивал назад, и это выглядело как сильный дрейф.
-        final rateDeg = (_phoneTilt == 0 ? gX : gY) * 180 / pi;
-        final byGyro = _phonePitch + rateDeg * dt;
-        // Акселерометр меряет гравитацию ПЛЮС собственное ускорение телефона.
-        // Пока его просто наклоняют, длина вектора держится около 9.8 и углу
-        // по нему можно верить. Стоит дёрнуть рукой - длина уезжает, и такой
-        // "угол" уже не про наклон: раньше он всё равно подмешивался, и
-        // резкое движение сбивало показания. Теперь на время рывка опираемся
-        // на гироскоп, а вернуть угол акселерометр успеет, когда рывок кончится.
-        final aLen = sqrt(_gx * _gx + _gy * _gy + _gz * _gz);
-        final trust = (1 - (aLen - 9.81).abs() / 2.0).clamp(0.0, 1.0);
-        final w = (1 - _phoneTauSec / (_phoneTauSec + dt)) * trust;
-        _phonePitch = (1 - w) * byGyro + w * _phoneAccelAngle;
-      });
       // Шлём каждые 100мс: на коробке данные устаревают через 400мс
       // (WT901_TIMEOUT), запас четырёхкратный.
       _phoneSendTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
@@ -1374,6 +1312,96 @@ class _RemotePageState extends State<_RemotePage> {
         }
       });
     }
+  }
+
+  // Запасной путь: сырые датчики через sensors_plus. Тут акселерометр меряет
+  // гравитацию вместе с ускорением руки, а на iOS у гироскопа не вычтено
+  // смещение нуля - обе беды лечит математика ниже, но хуже, чем это делает
+  // сама система.
+  void _startRawSensors() {
+    _accelSub = accelerometerEventStream(
+            samplingPeriod: SensorInterval.gameInterval)
+        .listen((e) => _feedGravity(e.x, e.y, e.z));
+    _gyroSub = gyroscopeEventStream(samplingPeriod: SensorInterval.gameInterval)
+        .listen((g) => _feedGyro(g.x, g.y, g.z));
+  }
+
+  // Направление "вниз" - от него считается наклон.
+  void _feedGravity(double x, double y, double z) {
+    // Вперёд-назад берём по оси Y, вбок - по X; в обоих случаях делим на
+    // длину оставшихся двух осей, чтобы угол не зависел от того, как
+    // сильно телефон повёрнут по другой оси.
+    _gx = x; _gy = y; _gz = z;
+    _phoneAccelAngle = _phoneTilt == 0
+        ? atan2(y, sqrt(x * x + z * z)) * 180 / pi
+        : atan2(-x, sqrt(y * y + z * z)) * 180 / pi;
+    if (!_phoneFiltInit) {
+      _phonePitch = _phoneAccelAngle;
+      _phoneShown = _phoneAccelAngle;
+      _phoneFiltInit = true;
+    }
+  }
+
+  void _feedGyro(double rawX, double rawY, double rawZ) {
+    final nowUs = DateTime.now().microsecondsSinceEpoch;
+    final prev = _lastGyroUs;
+    _lastGyroUs = nowUs;
+    if (prev == null || !_phoneFiltInit || !mounted) return;
+    final dt = (nowUs - prev) / 1e6;
+    if (dt <= 0 || dt > 0.5) return;   // пропуск/зависание - не интегрируем
+
+    // Оценка смещения нуля. Когда телефон почти неподвижен, всё, что
+    // показывает гироскоп - это и есть смещение, так что подтягиваем к нему
+    // оценку. Через свой канал смещение уже снято (Android отдаёт
+    // калиброванный гироскоп, iOS - CMDeviceMotion), и оценка просто стоит
+    // около нуля; нужна она для запасного пути на сырых датчиках.
+    final bx = rawX - _gyroBiasX, by = rawY - _gyroBiasY, bz = rawZ - _gyroBiasZ;
+    if (sqrt(bx * bx + by * by + bz * bz) < 0.06) {   // < ~3.4 °/с
+      // Скорости подстройки во времени, а не на отсчёт: первую секунду
+      // неподвижности сходимся быстро, дальше - с постоянной 10с. Медленную
+      // подстройку иначе съедал бы НАМЕРЕННЫЙ медленный поворот.
+      final k = (dt / (_gyroStillSec < 1.0 ? 0.3 : 10.0)).clamp(0.0, 1.0);
+      _gyroBiasX += k * (rawX - _gyroBiasX);
+      _gyroBiasY += k * (rawY - _gyroBiasY);
+      _gyroBiasZ += k * (rawZ - _gyroBiasZ);
+      _gyroStillSec += dt;
+    }
+    final gX = rawX - _gyroBiasX, gY = rawY - _gyroBiasY, gZ = rawZ - _gyroBiasZ;
+
+    if (_phoneTilt == 2) {
+      // YAW: опоры вроде силы тяжести тут нет (гравитация вдоль этой оси не
+      // меняется), поэтому только интегрируем гироскоп - и угол будет медленно
+      // уползать, это неизбежно. Проекция вектора вращения на направление силы
+      // тяжести даёт скорость поворота вокруг вертикали мира, независимо от
+      // того, как держат телефон.
+      final gLen = sqrt(_gx * _gx + _gy * _gy + _gz * _gz);
+      if (gLen < 1) return;
+      double rate = (gX * _gx + gY * _gy + gZ * _gz) / gLen; // рад/с
+      // Остаток смещения всё равно копится, поэтому совсем медленное вращение
+      // считаем стоянием: повод повернуть антенну - это осознанное движение,
+      // а не 0.5°/с.
+      if (rate.abs() < 0.01) rate = 0;   // ~0.6 °/с
+      _phoneYaw += rate * 180 / pi * dt;
+      if (_phoneYaw > 180) _phoneYaw -= 360;
+      if (_phoneYaw < -180) _phoneYaw += 360;
+      return;
+    }
+    // Знак ПЛЮС. Проверено по матрице поворота: при повороте телефона на угол
+    // θ вокруг оси X гравитация в его системе становится (0, g·sinθ, g·cosθ),
+    // то есть atan2(y, ...) даёт ровно +θ - и гироскоп по X меряет ту же
+    // +dθ/dt. То же для Y/roll. Раньше тут стоял минус: гироскоп тянул угол в
+    // обратную сторону, акселерометр его перетягивал назад, и это выглядело
+    // как сильный дрейф.
+    final rateDeg = (_phoneTilt == 0 ? gX : gY) * 180 / pi;
+    final byGyro = _phonePitch + rateDeg * dt;
+    // Через свой канал сюда приходит ЧИСТАЯ гравитация, её длина всегда 9.8 и
+    // доверие полное. Проверка нужна для запасного пути: там акселерометр
+    // меряет гравитацию плюс ускорение руки, и на время рывка (длина вектора
+    // уехала) опираться можно только на гироскоп.
+    final aLen = sqrt(_gx * _gx + _gy * _gy + _gz * _gz);
+    final trust = (1 - (aLen - 9.81).abs() / 2.0).clamp(0.0, 1.0);
+    final w = (1 - _phoneTauSec / (_phoneTauSec + dt)) * trust;
+    _phonePitch = (1 - w) * byGyro + w * _phoneAccelAngle;
   }
 
   @override
@@ -1451,6 +1479,7 @@ class _RemotePageState extends State<_RemotePage> {
     FlutterBluePlus.stopScan();
     _accelSub?.cancel();
     _gyroSub?.cancel();
+    _motionSub?.cancel();
     _phoneSendTimer?.cancel();
     // Возвращаем экран в обычный режим - иначе блокировка поворота и запрет
     // гаснуть остались бы висеть на всём приложении после ухода с этой страницы
