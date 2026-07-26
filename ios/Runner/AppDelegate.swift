@@ -66,13 +66,16 @@ class MotionChannel: NSObject, FlutterStreamHandler {
     // чтобы поведение на двух платформах совпадало.
     motion.deviceMotionUpdateInterval = 1.0 / 50.0
 
-    // Магнитометр помогает системе точнее оценить смещение гироскопа, поэтому
-    // просим рамку с коррекцией. Но именно "произвольную", а не магнитный
-    // север: приложение считает только ИЗМЕНЕНИЕ поворота, а рядом с ротатором
-    // достаточно железа, чтобы север уехал.
+    // Рамку выбирает переключатель компаса в приложении: с коррекцией по
+    // магнитометру поворот не уползает, без неё - не зависит от железа рядом.
+    // Одновременно две рамки CMMotionManager не отдаёт, поэтому при
+    // переключении Dart переподписывается заново.
+    // Магнитный север не берём ни в каком случае: считается только ИЗМЕНЕНИЕ
+    // поворота, а рядом с ротатором достаточно железа, чтобы север уехал.
+    let useCompass = (arguments as? Bool) ?? false
     let available = CMMotionManager.availableAttitudeReferenceFrames()
     let frame: CMAttitudeReferenceFrame =
-      available.contains(.xArbitraryCorrectedZVertical)
+      (useCompass && available.contains(.xArbitraryCorrectedZVertical))
       ? .xArbitraryCorrectedZVertical
       : .xArbitraryZVertical
 
