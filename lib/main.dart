@@ -1127,6 +1127,7 @@ class _RemotePageState extends State<_RemotePage> {
   static const _kPrefWt901Axis = 'wt901AxisForRemote';
   static const _kPrefLockRot   = 'lockRotation';
   static const _kPrefKeepAwake = 'keepAwake';
+  static const _kPrefUseCompass = 'useCompassForYaw';
 
   // Управление наклоном телефона конфликтует с его же системными функциями:
   // наклон вбок вызывает автоповорот экрана (интерфейс переворачивается прямо
@@ -1150,6 +1151,7 @@ class _RemotePageState extends State<_RemotePage> {
       _wt901Axis = p.getInt(_kPrefWt901Axis);
       _lockRotation = p.getBool(_kPrefLockRot) ?? _lockRotation;
       _keepAwake = p.getBool(_kPrefKeepAwake) ?? _keepAwake;
+      _useCompass = p.getBool(_kPrefUseCompass) ?? _useCompass;
     });
     _applyScreenPrefs();
   }
@@ -1159,6 +1161,7 @@ class _RemotePageState extends State<_RemotePage> {
     await p.setInt(_kPrefPhoneTilt, _phoneTilt);
     await p.setBool(_kPrefLockRot, _lockRotation);
     await p.setBool(_kPrefKeepAwake, _keepAwake);
+    await p.setBool(_kPrefUseCompass, _useCompass);
     final a = _wt901Axis;
     if (a != null) await p.setInt(_kPrefWt901Axis, a);
   }
@@ -1182,6 +1185,12 @@ class _RemotePageState extends State<_RemotePage> {
   // конца: пара градусов в секунду - это уже пара оборотов за минуту. Поэтому
   // оцениваем его сами и вычитаем (стандартный приём zero-rate update).
   double _gyroBiasX = 0, _gyroBiasY = 0, _gyroBiasZ = 0;
+  // Прошлая абсолютная ориентация - от неё считается изменение поворота.
+  double _qw = 0, _qx = 0, _qy = 0, _qz = 0;
+  bool _haveAttitude = false;
+  // Использовать ли системную ориентацию (она слита с магнитометром) для Yaw.
+  // Выключено = считаем поворот интегрированием гироскопа, как раньше.
+  bool _useCompass = true;
   double _gyroStillSec = 0;
 
   // Постоянная времени слияния, секунды: за столько акселерометр вытягивает
@@ -1240,6 +1249,7 @@ class _RemotePageState extends State<_RemotePage> {
     _gyroSub?.cancel(); _gyroSub = null;
     _motionSub?.cancel(); _motionSub = null;
     _phoneSendTimer?.cancel(); _phoneSendTimer = null;
+    _haveAttitude = false;   // между сеансами разницу поворотов не считаем
     _phoneFiltInit = false;
     _lastGyroUs = null;
 
@@ -1286,6 +1296,11 @@ class _RemotePageState extends State<_RemotePage> {
       _motionSub = _motionChannel.receiveBroadcastStream().listen((ev) {
         final v = (ev as List).cast<double>();
         _feedGravity(v[0], v[1], v[2]);
+        // Кватернион приходит не всегда - на устройстве может не быть
+        // TYPE_ROTATION_VECTOR. Тогда поворот считает _feedGyro, как раньше.
+        if (_useCompass && v.length >= 10) {
+          _feedAttitude(v[6], v[7], v[8], v[9]);
+        }
         _feedGyro(v[3], v[4], v[5]);
       }, onError: (_) {
         if (_motionSub == null) return;   // подписку уже сняли - это не сбой
@@ -1342,6 +1357,43 @@ class _RemotePageState extends State<_RemotePage> {
     }
   }
 
+  // Поворот по АБСОЛЮТНОЙ ориентации от системы вместо интегрирования гироскопа.
+  //
+  // Почему это важно именно для Yaw: у наклона опора есть - гравитация всегда
+  // вниз, и ошибка не копится. У поворота вокруг вертикали опоры нет вообще,
+  // поэтому любой остаток смещения нуля гироскопа накапливается без конца.
+  // Оценка смещения его уменьшает, но убрать не может - дрейф оставался.
+  // Системная ориентация слита с магнитометром (Android TYPE_ROTATION_VECTOR,
+  // iOS - рамка с коррекцией), то есть опора у неё есть и она не уползает.
+  //
+  // Берём именно ИЗМЕНЕНИЕ между соседними отсчётами, а не готовый азимут:
+  // азимут вырождается, когда телефон держат вертикально (та же беда, что и у
+  // "gimbal lock"), а разница поворотов считается одинаково хорошо в любом
+  // положении. Заодно сохраняется прежний смысл: Yaw отсчитывается от момента
+  // выбора оси, а не от севера.
+  void _feedAttitude(double w, double x, double y, double z) {
+    if (_haveAttitude) {
+      // Δq = q_текущий ⊗ q_прошлый⁻¹ - поворот, случившийся в системе координат
+      // МИРА. У единичного кватерниона обратный равен сопряжённому.
+      final dw = w * _qw + x * _qx + y * _qy + z * _qz;
+      var dz = -w * _qz - x * _qy + y * _qx + z * _qw;
+      // Кватернионы q и -q описывают один поворот; без этого при смене знака
+      // получался бы скачок на пол-оборота.
+      if (dw < 0) dz = -dz;
+      // За 20мс поворот заведомо мал, поэтому угол = удвоенная векторная часть.
+      // Мировая ось Z смотрит вверх и там, и там, так что z-компонента - это
+      // ровно поворот вокруг вертикали.
+      final dYaw = 2 * dz * 180 / pi;
+      if (dYaw.abs() < 45) {   // разумный шаг; больше - сбой потока, пропускаем
+        _phoneYaw += dYaw;
+        if (_phoneYaw > 180) _phoneYaw -= 360;
+        if (_phoneYaw < -180) _phoneYaw += 360;
+      }
+    }
+    _qw = w; _qx = x; _qy = y; _qz = z;
+    _haveAttitude = true;
+  }
+
   void _feedGyro(double rawX, double rawY, double rawZ) {
     final nowUs = DateTime.now().microsecondsSinceEpoch;
     final prev = _lastGyroUs;
@@ -1369,11 +1421,14 @@ class _RemotePageState extends State<_RemotePage> {
     final gX = rawX - _gyroBiasX, gY = rawY - _gyroBiasY, gZ = rawZ - _gyroBiasZ;
 
     if (_phoneTilt == 2) {
-      // YAW: опоры вроде силы тяжести тут нет (гравитация вдоль этой оси не
-      // меняется), поэтому только интегрируем гироскоп - и угол будет медленно
-      // уползать, это неизбежно. Проекция вектора вращения на направление силы
-      // тяжести даёт скорость поворота вокруг вертикали мира, независимо от
-      // того, как держат телефон.
+      // Если система даёт абсолютную ориентацию, поворот уже посчитан по ней
+      // (см. _feedAttitude) - интегрировать нечего.
+      if (_haveAttitude) return;
+      // Запасной путь: опоры тут нет (гравитация вдоль этой оси не меняется),
+      // поэтому только интегрируем гироскоп - и угол будет медленно уползать,
+      // это неизбежно. Проекция вектора вращения на направление силы тяжести
+      // даёт скорость поворота вокруг вертикали мира, независимо от того, как
+      // держат телефон.
       final gLen = sqrt(_gx * _gx + _gy * _gy + _gz * _gz);
       if (gLen < 1) return;
       double rate = (gX * _gx + gY * _gy + gZ * _gz) / gLen; // рад/с
@@ -1688,13 +1743,38 @@ class _RemotePageState extends State<_RemotePage> {
             const SizedBox(height: 6),
             Text(
               _phoneTilt == 2
-                  ? 'Yaw follows phone rotation. Works in OFF mode only.\n'
-                    'Gyro-only — it slowly drifts, re-select Yaw to reset.'
+                  ? _useCompass
+                      ? 'Yaw follows phone rotation. Works in OFF mode only.'
+                      : 'Yaw follows phone rotation. Works in OFF mode only.\n'
+                        'Gyro-only — it slowly drifts, re-select Yaw to reset.'
                   : 'Use ZERO button below to set center.',
               textAlign: TextAlign.center,
               style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
             ),
             const Divider(),
+            // Поворот вокруг вертикали не на что опереть, кроме магнитометра -
+            // без него остаток смещения гироскопа копится и Yaw уползает. Но
+            // рядом с ротатором железа и мотор, поле там искажено, поэтому
+            // компас должно быть можно выключить и вернуться к гироскопу.
+            SwitchListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              value: _useCompass,
+              onChanged: (v) {
+                setState(() {
+                  _useCompass = v;
+                  _haveAttitude = false;   // источник поворота сменился
+                });
+                _saveAxisPrefs();
+              },
+              title: const Text('Compass correction for Yaw',
+                  style: TextStyle(fontSize: 14)),
+              subtitle: Text(
+                  _useCompass
+                      ? 'no drift; turn off if metal nearby skews it'
+                      : 'gyro only — drifts, but immune to metal',
+                  style: const TextStyle(fontSize: 12)),
+            ),
             // Наклон телефона мешает его же системным функциям: вбок - ловится
             // автоповорот и интерфейс переворачивается прямо во время работы,
             // а погасший экран останавливает поток с датчиков.

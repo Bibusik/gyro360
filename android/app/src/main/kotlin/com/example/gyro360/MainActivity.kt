@@ -44,6 +44,13 @@ class MotionStreamHandler(context: Context) : EventChannel.StreamHandler, Sensor
     private val gravity = FloatArray(3)
     private var haveGravity = false
 
+    // Абсолютная ориентация как кватернион [w, x, y, z]. От гироскопа она
+    // отличается принципиально: TYPE_ROTATION_VECTOR слит с магнитометром, то
+    // есть у поворота вокруг вертикали есть опора и он НЕ уползает. Гироскоп
+    // такой опоры не имеет, и любой остаток смещения нуля копится без конца.
+    private val quaternion = FloatArray(4)
+    private var haveQuaternion = false
+
     override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
         sink = events
         // TYPE_GRAVITY есть не на всех устройствах; там, где его нет,
@@ -57,12 +64,17 @@ class MotionStreamHandler(context: Context) : EventChannel.StreamHandler, Sensor
         }
         sensors.registerListener(this, gravitySensor, SAMPLING_US)
         sensors.registerListener(this, gyro, SAMPLING_US)
+        // Необязательный: если его нет, Dart сам вернётся к интегрированию.
+        sensors.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)?.let {
+            sensors.registerListener(this, it, SAMPLING_US)
+        }
     }
 
     override fun onCancel(arguments: Any?) {
         sensors.unregisterListener(this)
         sink = null
         haveGravity = false
+        haveQuaternion = false
     }
 
     override fun onSensorChanged(e: SensorEvent) {
@@ -73,17 +85,28 @@ class MotionStreamHandler(context: Context) : EventChannel.StreamHandler, Sensor
                 gravity[2] = e.values[2]
                 haveGravity = true
             }
+            Sensor.TYPE_ROTATION_VECTOR -> {
+                SensorManager.getQuaternionFromVector(quaternion, e.values)
+                haveQuaternion = true
+            }
             Sensor.TYPE_GYROSCOPE -> {
                 // Посылку формирует гироскоп: именно он задаёт шаг интегрирования
                 // в Dart, а гравитация нужна только как последнее известное
                 // направление "вниз".
                 if (!haveGravity) return
-                sink?.success(
-                    listOf(
-                        gravity[0].toDouble(), gravity[1].toDouble(), gravity[2].toDouble(),
-                        e.values[0].toDouble(), e.values[1].toDouble(), e.values[2].toDouble()
-                    )
+                val out = mutableListOf(
+                    gravity[0].toDouble(), gravity[1].toDouble(), gravity[2].toDouble(),
+                    e.values[0].toDouble(), e.values[1].toDouble(), e.values[2].toDouble()
                 )
+                // Кватернион дописываем в конец, чтобы посылка без него осталась
+                // читаемой: Dart смотрит на длину списка.
+                if (haveQuaternion) {
+                    out.add(quaternion[0].toDouble())
+                    out.add(quaternion[1].toDouble())
+                    out.add(quaternion[2].toDouble())
+                    out.add(quaternion[3].toDouble())
+                }
+                sink?.success(out)
             }
         }
     }

@@ -91,12 +91,16 @@ class MotionChannel: NSObject, FlutterStreamHandler {
 
       let g = d.gravity
       let r = d.rotationRate
+      let q = d.attitude.quaternion
       // Знаки и единицы приводим к соглашению Android - ровно так же, как это
       // делает сам sensors_plus (инвертирует оси и переводит g в м/с²).
       // Тогда на обеих платформах работает одна и та же математика в Dart.
+      // Кватернион идёт последним и в том же порядке [w, x, y, z], что даёт
+      // Android SensorManager.getQuaternionFromVector.
       let payload: [Double] = [
         -g.x * 9.80665, -g.y * 9.80665, -g.z * 9.80665,
         r.x, r.y, r.z,
+        q.w, q.x, q.y, q.z,
       ]
       // events() обязан вызываться на главном потоке - обновления CoreMotion
       // приходят на фоновую очередь.
