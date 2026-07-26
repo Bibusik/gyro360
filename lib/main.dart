@@ -1086,6 +1086,8 @@ class _RemotePage extends StatefulWidget {
 
 class _RemotePageState extends State<_RemotePage> {
   late double _deadVal, _speedVal, _speed2AngleVal, _speed2Val;
+  // Тянут ли сейчас какой-нибудь слайдер - см. _onStateChange.
+  bool _draggingSlider = false;
 
   // Скан BLE-устройств поблизости для привязки WT901 - только на Android.
   // На iOS flutter_blue_plus не может получить настоящий MAC-адрес -
@@ -1551,10 +1553,16 @@ class _RemotePageState extends State<_RemotePage> {
   }
 
   void _onStateChange() {
-    _deadVal = widget.state.wt901DeadZone.clamp(0.0, 45.0);
-    _speedVal = widget.state.wt901Speed.toDouble().clamp(1.0, 15.0);
-    _speed2AngleVal = widget.state.wt901Speed2Angle.clamp(0.0, 90.0);
-    _speed2Val = widget.state.wt901Speed2.toDouble().clamp(1.0, 25.0);
+    // Пока слайдер тянут пальцем, его значение принадлежит пользователю.
+    // Прилетевший статус несёт ЕЩЁ СТАРОЕ значение (ротатор узнает о новом
+    // только когда палец отпустят - см. onChangeEnd), и без этой проверки он
+    // отбрасывал бегунок назад прямо посреди движения.
+    if (!_draggingSlider) {
+      _deadVal = widget.state.wt901DeadZone.clamp(0.0, 45.0);
+      _speedVal = widget.state.wt901Speed.toDouble().clamp(1.0, 15.0);
+      _speed2AngleVal = widget.state.wt901Speed2Angle.clamp(0.0, 90.0);
+      _speed2Val = widget.state.wt901Speed2.toDouble().clamp(1.0, 25.0);
+    }
     _syncConnectedFromState();
     // Ротатор мог сам выключить WT901 (физической кнопкой) - тогда возвращаем
     // переключатель в "Выкл" и глушим отправку с телефона. Обратно в WT901 не
@@ -2108,8 +2116,8 @@ class _RemotePageState extends State<_RemotePage> {
                     Text('${_deadVal.round()}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                   ]),
                   Slider(value: _deadVal, min: 0, max: 45, divisions: 45, activeColor: Colors.orange, allowedInteraction: SliderInteraction.slideThumb,
-                    onChanged: (v) => setState(() => _deadVal = v),
-                    onChangeEnd: (v) { s.wt901DeadZone = v; bt.send('WT901_DEAD=${v.toStringAsFixed(1)};'); }),
+                    onChanged: (v) => setState(() { _draggingSlider = true; _deadVal = v; }),
+                    onChangeEnd: (v) { _draggingSlider = false; s.wt901DeadZone = v; bt.send('WT901_DEAD=${v.toStringAsFixed(1)};'); }),
                 ])),
                 Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4), child: Column(children: [
                   Row(children: [
@@ -2118,8 +2126,8 @@ class _RemotePageState extends State<_RemotePage> {
                     Text('${_speedVal.round()}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                   ]),
                   Slider(value: _speedVal, min: 1, max: 15, divisions: 14, activeColor: Colors.orange, allowedInteraction: SliderInteraction.slideThumb,
-                    onChanged: (v) => setState(() => _speedVal = v),
-                    onChangeEnd: (v) { s.wt901Speed = v.round(); bt.send('WT901_SPEED=${v.round()};'); }),
+                    onChanged: (v) => setState(() { _draggingSlider = true; _speedVal = v; }),
+                    onChangeEnd: (v) { _draggingSlider = false; s.wt901Speed = v.round(); bt.send('WT901_SPEED=${v.round()};'); }),
                 ])),
                 Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), child: _row('2nd speed:', Switch(
                   value: s.wt901Speed2Enabled,
@@ -2135,8 +2143,8 @@ class _RemotePageState extends State<_RemotePage> {
                     Text('${_speed2AngleVal.round()}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                   ]),
                   Slider(value: _speed2AngleVal, min: 0, max: 90, divisions: 90, activeColor: Colors.orange, allowedInteraction: SliderInteraction.slideThumb,
-                    onChanged: (v) => setState(() => _speed2AngleVal = v),
-                    onChangeEnd: (v) { s.wt901Speed2Angle = v; bt.send('WT901_SPEED2_ANGLE=${v.toStringAsFixed(1)};'); }),
+                    onChanged: (v) => setState(() { _draggingSlider = true; _speed2AngleVal = v; }),
+                    onChangeEnd: (v) { _draggingSlider = false; s.wt901Speed2Angle = v; bt.send('WT901_SPEED2_ANGLE=${v.toStringAsFixed(1)};'); }),
                 ])),
                 Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4), child: Column(children: [
                   Row(children: [
@@ -2145,8 +2153,8 @@ class _RemotePageState extends State<_RemotePage> {
                     Text('${_speed2Val.round()}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                   ]),
                   Slider(value: _speed2Val, min: 1, max: 25, divisions: 24, activeColor: Colors.orange, allowedInteraction: SliderInteraction.slideThumb,
-                    onChanged: (v) => setState(() => _speed2Val = v),
-                    onChangeEnd: (v) { s.wt901Speed2 = v.round(); bt.send('WT901_SPEED2=${v.round()};'); }),
+                    onChanged: (v) => setState(() { _draggingSlider = true; _speed2Val = v; }),
+                    onChangeEnd: (v) { _draggingSlider = false; s.wt901Speed2 = v.round(); bt.send('WT901_SPEED2=${v.round()};'); }),
                 ])),
                     ]),
                   ),
