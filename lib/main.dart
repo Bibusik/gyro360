@@ -1097,6 +1097,8 @@ class _RemotePageState extends State<_RemotePage> {
   // на iPhone возможна только через веб-страницу ротора (ручной ввод байт).
   final Map<String, ScanResult> _scanResults = {};
   bool _scanning = false;
+  // Раскрыт ли блок привязки датчика - см. кнопку "Pair / change sensor".
+  bool _showPairing = false;
   StreamSubscription<List<ScanResult>>? _scanSub;
   String? _connectedMac;   // MAC выбранного устройства
   String? _connectedName;
@@ -1657,7 +1659,9 @@ class _RemotePageState extends State<_RemotePage> {
     _syncConnectedFromState();
     widget.state.addListener(_onStateChange);
     _loadAxisPrefs();   // запомненные оси для каждого источника
-    if (!Platform.isIOS) _startScan();
+    // Скан больше не стартует при входе на страницу: блок привязки свёрнут,
+    // и запускать радио, которое нужно управлению, ради скрытого списка незачем.
+    // Скан начинается при раскрытии блока (см. кнопку "Pair / change sensor").
   }
 
   void _submitManualMac() {
@@ -2109,7 +2113,25 @@ class _RemotePageState extends State<_RemotePage> {
                       constraints: const BoxConstraints(),
                     ),
                 ]),
-                const SizedBox(height: 8),
+                // Привязка нужна редко - раз настроил и забыл, - а список
+                // занимал полэкрана постоянно. Прячем его под кнопку; строка
+                // с уже привязанным датчиком остаётся видна всегда.
+                SizedBox(
+                  height: 30,
+                  child: TextButton.icon(
+                    onPressed: () {
+                      setState(() => _showPairing = !_showPairing);
+                      // Скан запускаем в момент раскрытия, а не при входе на
+                      // страницу: он занимает радио, которое нужно управлению.
+                      if (_showPairing && !Platform.isIOS) _startScan();
+                      if (!_showPairing) _stopScan();
+                    },
+                    icon: Icon(_showPairing ? Icons.expand_less : Icons.expand_more, size: 20),
+                    label: Text(_showPairing ? 'Hide' : 'Pair / change sensor',
+                        style: const TextStyle(fontSize: 13)),
+                    style: TextButton.styleFrom(padding: EdgeInsets.zero, minimumSize: Size.zero),
+                  ),
+                ),
 
                 // Список найденных устройств (скан со стороны телефона). На
                 // iOS CoreBluetooth не отдаёт настоящий MAC-адрес стороннему
@@ -2117,7 +2139,7 @@ class _RemotePageState extends State<_RemotePage> {
                 // сканирование на iPhone принципиально невозможно - вместо
                 // списка показываем поле ручного ввода (тот же MAC, отправка
                 // идёт обычной BLE-записью, сканирование тут не нужно).
-                if (Platform.isIOS) ...[
+                if (_showPairing && Platform.isIOS) ...[
                   Text(
                     'Scanning is not available on iPhone (iOS hides the real Bluetooth address from apps). '
                     'Enter the WT901 MAC address manually below.',
@@ -2175,7 +2197,7 @@ class _RemotePageState extends State<_RemotePage> {
                     width: double.infinity,
                     child: ElevatedButton(onPressed: _submitManualMac, child: const Text('Set MAC')),
                   ),
-                ] else ...[
+                ] else if (_showPairing) ...[
                   Row(children: [
                     const Expanded(child: Text('Nearby devices:', style: TextStyle(fontWeight: FontWeight.bold))),
                     if (_scanning)
