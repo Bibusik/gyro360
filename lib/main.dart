@@ -1170,6 +1170,16 @@ class _RemotePageState extends State<_RemotePage> {
   double _gx = 0, _gy = 0, _gz = 0;
   double _phoneYaw = 0;        // накопленный поворот, градусы
 
+  // Смещение нуля гироскопа: лежащий неподвижно телефон всё равно показывает
+  // ненулевую скорость вращения. На Android система отдаёт уже
+  // скомпенсированный TYPE_GYROSCOPE, а на iOS sensors_plus берёт СЫРОЙ
+  // startGyroUpdates - смещение приходит как есть. Для Pitch/Roll его держит
+  // акселерометр, а Yaw опереться не на что, и смещение интегрируется без
+  // конца: пара градусов в секунду - это уже пара оборотов за минуту. Поэтому
+  // оцениваем его сами и вычитаем (стандартный приём zero-rate update).
+  double _gyroBiasX = 0, _gyroBiasY = 0, _gyroBiasZ = 0;
+  int _gyroStillSamples = 0;
+
   // Ноль НЕ считаем в приложении: этим занимается сама прошивка по кнопке
   // "ZERO CURRENT AXIS" (она запоминает текущий угол как центр и хранит его
   // во флеше). Телефон ведёт себя ровно как настоящий WT901 - шлёт сырой
@@ -1276,6 +1286,23 @@ class _RemotePageState extends State<_RemotePage> {
         final dt = (nowUs - prev) / 1e6;
         if (dt <= 0 || dt > 0.5) return;   // пропуск/зависание - не интегрируем
 
+        // Оценка смещения нуля. Когда телефон почти неподвижен, всё, что
+        // показывает гироскоп - это и есть смещение, так что подтягиваем к
+        // нему оценку. Первые отсчёты берём крупным шагом (иначе после
+        // запуска Yaw уползал бы, пока оценка сходится), дальше - мелким:
+        // само смещение меняется медленно, от прогрева и температуры, а вот
+        // медленный НАМЕРЕННЫЙ поворот при быстрой подстройке оценка приняла
+        // бы за смещение и съела.
+        final bx = g.x - _gyroBiasX, by = g.y - _gyroBiasY, bz = g.z - _gyroBiasZ;
+        if (sqrt(bx * bx + by * by + bz * bz) < 0.06) {   // < ~3.4 °/с
+          final k = _gyroStillSamples < 10 ? 0.30 : 0.02;
+          _gyroBiasX += k * (g.x - _gyroBiasX);
+          _gyroBiasY += k * (g.y - _gyroBiasY);
+          _gyroBiasZ += k * (g.z - _gyroBiasZ);
+          _gyroStillSamples++;
+        }
+        final gX = g.x - _gyroBiasX, gY = g.y - _gyroBiasY, gZ = g.z - _gyroBiasZ;
+
         if (_phoneTilt == 2) {
           // YAW: опоры вроде силы тяжести тут нет (гравитация вдоль этой оси
           // не меняется), поэтому только интегрируем гироскоп - и угол будет
@@ -1284,7 +1311,11 @@ class _RemotePageState extends State<_RemotePage> {
           // мира, независимо от того, как держат телефон.
           final gLen = sqrt(_gx * _gx + _gy * _gy + _gz * _gz);
           if (gLen < 1) return;
-          final rate = (g.x * _gx + g.y * _gy + g.z * _gz) / gLen; // рад/с
+          double rate = (gX * _gx + gY * _gy + gZ * _gz) / gLen; // рад/с
+          // Оценка смещения не бывает идеальной, а остаток всё равно копится.
+          // Поэтому совсем медленное вращение считаем стоянием: повод повернуть
+          // антенну - это осознанное движение, а не 0.5°/с.
+          if (rate.abs() < 0.01) rate = 0;   // ~0.6 °/с
           setState(() {
             _phoneYaw += rate * 180 / pi * dt;
             if (_phoneYaw > 180) _phoneYaw -= 360;
@@ -1299,7 +1330,7 @@ class _RemotePageState extends State<_RemotePage> {
         // гироскоп по X меряет ту же +dθ/dt. То же для Y/roll. Раньше тут
         // стоял минус: гироскоп тянул угол в обратную сторону, акселерометр
         // его перетягивал назад, и это выглядело как сильный дрейф.
-        final rateDeg = (_phoneTilt == 0 ? g.x : g.y) * 180 / pi;
+        final rateDeg = (_phoneTilt == 0 ? gX : gY) * 180 / pi;
         final byGyro = _phonePitch + rateDeg * dt;
         setState(() {
           // Вес гироскопа намеренно НЕ высокий. При 0.98 угол заметно плавал:
