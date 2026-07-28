@@ -1672,7 +1672,7 @@ class _RemotePageState extends State<_RemotePage> {
     final mac = _manualMacCtrls.map((c) => c.text.trim().padLeft(2, '0').toUpperCase()).join(':');
     setState(() {
       _connectedMac = mac;
-      _connectedName = mac;
+      _connectedName = _remoteDisplayName;
     });
     widget.bt.send('WT901_MAC=$mac;');
     FocusManager.instance.primaryFocus?.unfocus();
@@ -1692,7 +1692,9 @@ class _RemotePageState extends State<_RemotePage> {
     }
     if (_connectedMac != mac) {
       _connectedMac = mac;
-      _connectedName = mac; // пока не пересканировали — показываем сам MAC
+      // Имя у привязанного пульта всегда одно и то же - показываем его, а сам
+      // MAC и так виден в строке ниже.
+      _connectedName = _remoteDisplayName;
     }
   }
 
@@ -1747,14 +1749,24 @@ class _RemotePageState extends State<_RemotePage> {
     super.dispose();
   }
 
+  // Пульт рекламируется под заводским именем вида WT901BLE67 (номер у каждого
+  // экземпляра свой, поэтому сравниваем по началу, а не целиком). Раньше в
+  // список падало всё вокруг, кроме самого ротатора, и найти среди этого нужное
+  // устройство было отдельной задачей.
+  static const _remoteNamePrefix = 'WT901';
+  // В интерфейсе показываем своё имя: заводское ничего не говорит владельцу.
+  static const _remoteDisplayName = 'Gyro360 remote';
+
+  static bool _isRemote(String name) =>
+      name.toUpperCase().startsWith(_remoteNamePrefix);
+
   void _startScan() {
     setState(() { _scanning = true; _scanResults.clear(); });
     _scanSub?.cancel();
     FlutterBluePlus.stopScan();
     _scanSub = FlutterBluePlus.scanResults.listen((results) {
       for (final r in results) {
-        // Не показываем сам ротор (GYRO360) — это другое устройство/протокол
-        if (r.device.platformName.isNotEmpty && r.device.platformName != 'GYRO360') {
+        if (_isRemote(r.device.platformName)) {
           setState(() => _scanResults[r.device.remoteId.str] = r);
         }
       }
@@ -1775,7 +1787,7 @@ class _RemotePageState extends State<_RemotePage> {
     _stopScan();
     setState(() {
       _connectedMac  = r.device.remoteId.str;
-      _connectedName = r.device.platformName.isNotEmpty ? r.device.platformName : r.device.remoteId.str;
+      _connectedName = _remoteDisplayName;
     });
     // Отправляем MAC на ротатор
     widget.bt.send('WT901_MAC=${r.device.remoteId.str};');
@@ -2308,7 +2320,7 @@ class _RemotePageState extends State<_RemotePage> {
                         dense: true,
                         contentPadding: EdgeInsets.zero,
                         leading: Icon(Icons.sensors, color: isSelected ? Colors.green : const Color(0xFF546E7A)),
-                        title: Text(r.device.platformName.isNotEmpty ? r.device.platformName : r.device.remoteId.str,
+                        title: Text(_remoteDisplayName,
                             style: TextStyle(fontWeight: isSelected ? FontWeight.bold : FontWeight.normal, fontSize: 14)),
                         subtitle: Text(r.device.remoteId.str, style: const TextStyle(fontSize: 11)),
                         trailing: Row(mainAxisSize: MainAxisSize.min, children: [
