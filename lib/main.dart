@@ -176,6 +176,9 @@ class AppState extends ChangeNotifier {
   // статусе - чтобы переключатель в приложении показывал реальное положение
   // дел, а не то, что мы думаем.
   bool wt901SrcPhone = false;
+  // Гасить ли встроенный гироскоп на время слежения за Yaw. Живёт в прошивке
+  // (и во флеше коробки), поэтому работает и без приложения - с веб-страницы.
+  bool yawAutoGyro = false;
 
   void reset() {
     motorDeg = 0; reduction = 0; maxSpeedRpm = 0; minSpeedRpm = 0;
@@ -261,6 +264,7 @@ class AppState extends ChangeNotifier {
         case 'WT901_YAW_REV': wt901YawReverse = v == '1';
         case 'WT901_PITCH_ZERO': wt901PitchZero = double.tryParse(v) ?? wt901PitchZero;
         case 'WT901_SRC': wt901SrcPhone = v == '1';
+        case 'YAW_AUTO_GYRO': yawAutoGyro = v == '1';
       }
     }
     notifyListeners();
@@ -2077,6 +2081,16 @@ class _RemotePageState extends State<_RemotePage> {
                     value: s.wt901YawReverse,
                     onChanged: (v) { setState(() => s.wt901YawReverse = v); bt.send('WT901_YAW_REV=${v ? 1 : 0};'); },
                   )),
+                // Слежение за Yaw работает ТОЛЬКО в режиме OFF - при включённом
+                // встроенном гироскопе оно молча ничего не делает. Этот режим
+                // гасит гироскоп на время работы Yaw и возвращает обратно.
+                // Настройка живёт в прошивке, поэтому касается и WT901, и
+                // телефона, и видна на веб-странице.
+                if (s.wt901Axis == 2)
+                  _miniSwitch('Auto-off built-in gyro for Yaw', s.yawAutoGyro, (v) {
+                    setState(() => s.yawAutoGyro = v);
+                    bt.send('YAW_AUTO_GYRO=${v ? 1 : 0};');
+                  }),
               ]),
             ),
 
