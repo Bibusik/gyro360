@@ -1102,6 +1102,8 @@ class _RemotePageState extends State<_RemotePage> {
   bool _scanning = false;
   // Раскрыт ли блок привязки датчика - см. кнопку "Pair / change sensor".
   bool _showPairing = false;
+  // Момент начала текущего поиска - по нему отбрасываем результаты прошлого.
+  DateTime _scanStartedAt = DateTime.now();
   StreamSubscription<List<ScanResult>>? _scanSub;
   String? _connectedMac;   // MAC выбранного устройства
   String? _connectedName;
@@ -1765,11 +1767,17 @@ class _RemotePageState extends State<_RemotePage> {
   }
 
   void _startScan() {
+    // Отсекаем всё, что увидено ДО начала этого поиска: библиотека отдаёт
+    // накопленный список, и записи прошлого скана прилетают сразу при открытии.
+    // Выглядело так, будто пульт уже в эфире, хотя он ещё даже не включён -
+    // привязаться к такому "устройству" нельзя, а список врёт.
+    _scanStartedAt = DateTime.now();
     setState(() { _scanning = true; _scanResults.clear(); });
     _scanSub?.cancel();
     FlutterBluePlus.stopScan();
     _scanSub = FlutterBluePlus.scanResults.listen((results) {
       for (final r in results) {
+        if (r.timeStamp.isBefore(_scanStartedAt)) continue;
         if (_isRemote(_advName(r))) {
           setState(() => _scanResults[r.device.remoteId.str] = r);
         }
@@ -2265,20 +2273,18 @@ class _RemotePageState extends State<_RemotePage> {
                     Text('Press refresh to scan', style: TextStyle(color: Colors.grey.shade600, fontSize: 13))
                   else
                     ..._scanResults.values.map((r) {
-                      final isSelected = r.device.remoteId.str == _connectedMac;
+                      // Сравниваем по адресу ИЗ ИМЕНИ: remoteId на iPhone -
+                      // случайный UUID, и с сохранённым MAC он не совпадёт.
+                      final isSelected = _macFromName(_advName(r)) == _connectedMac;
                       return ListTile(
                         dense: true,
                         contentPadding: EdgeInsets.zero,
                         leading: Icon(Icons.sensors, color: isSelected ? Colors.green : const Color(0xFF546E7A)),
                         title: Text(_remoteDisplayName,
                             style: TextStyle(fontWeight: isSelected ? FontWeight.bold : FontWeight.normal, fontSize: 14)),
-                        // Проверено 2026-07-28: MAC в рекламе НЕ передаётся -
-                        // manufacturer data и service data у WT901 пусты, в
-                        // объявлении только имя. Адрес есть лишь в remoteId,
-                        // который iOS подменяет случайным UUID. Значит родное
-                        // приложение WitMotion читает его после подключения, по
-                        // GATT из самого датчика - другого источника нет.
-                        subtitle: Text(r.device.remoteId.str, style: const TextStyle(fontSize: 11)),
+                        // Адрес не показываем: он и так внутри имени, а на
+                        // экране от него никакой пользы - выбирать всё равно
+                        // по названию.
                         trailing: Row(mainAxisSize: MainAxisSize.min, children: [
                           _SignalBars(_rssiBars(r.rssi)),
                           const SizedBox(width: 8),
