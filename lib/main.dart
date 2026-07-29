@@ -1742,6 +1742,17 @@ class _RemotePageState extends State<_RemotePage> {
 
   static final _macInName = RegExp(r'^WTG([0-9A-F]{12})$', caseSensitive: false);
 
+  /// Имя берём ИЗ РЕКЛАМНОГО ПАКЕТА, а не из device.platformName.
+  ///
+  /// iOS кэширует имя устройства с прошлых встреч и продолжает отдавать
+  /// старое - после переименования датчика айфон ещё долго называет его
+  /// прежним WT901BLE67, и по нему привязка не находится вовсе. Реклама же
+  /// приходит свежая в каждом пакете. На Android разницы нет.
+  static String _advName(ScanResult r) {
+    final adv = r.advertisementData.advName.trim();
+    return adv.isNotEmpty ? adv : r.device.platformName.trim();
+  }
+
   static bool _isRemote(String name) => _macInName.hasMatch(name.trim());
 
   /// Достаёт настоящий MAC из имени: WTGD2614A030C1E -> D2:61:4A:03:0C:1E.
@@ -1759,7 +1770,7 @@ class _RemotePageState extends State<_RemotePage> {
     FlutterBluePlus.stopScan();
     _scanSub = FlutterBluePlus.scanResults.listen((results) {
       for (final r in results) {
-        if (_isRemote(r.device.platformName)) {
+        if (_isRemote(_advName(r))) {
           setState(() => _scanResults[r.device.remoteId.str] = r);
         }
       }
@@ -1780,7 +1791,7 @@ class _RemotePageState extends State<_RemotePage> {
     // Адрес берём ИЗ ИМЕНИ, а не из remoteId: на Android они совпадают, а на
     // iPhone remoteId - это случайный UUID, подставленный системой, и ротатор
     // по нему датчик не найдёт. Имя же одинаково на обеих платформах.
-    final mac = _macFromName(r.device.platformName);
+    final mac = _macFromName(_advName(r));
     if (mac == null) return;   // в список такие и не попадают, но пусть
     _stopScan();
     setState(() {
