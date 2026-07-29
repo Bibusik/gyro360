@@ -2322,6 +2322,12 @@ class _RemotePageState extends State<_RemotePage> {
                         leading: Icon(Icons.sensors, color: isSelected ? Colors.green : const Color(0xFF546E7A)),
                         title: Text(_remoteDisplayName,
                             style: TextStyle(fontWeight: isSelected ? FontWeight.bold : FontWeight.normal, fontSize: 14)),
+                        // Проверено 2026-07-28: MAC в рекламе НЕ передаётся -
+                        // manufacturer data и service data у WT901 пусты, в
+                        // объявлении только имя. Адрес есть лишь в remoteId,
+                        // который iOS подменяет случайным UUID. Значит родное
+                        // приложение WitMotion читает его после подключения, по
+                        // GATT из самого датчика - другого источника нет.
                         subtitle: Text(r.device.remoteId.str, style: const TextStyle(fontSize: 11)),
                         trailing: Row(mainAxisSize: MainAxisSize.min, children: [
                           _SignalBars(_rssiBars(r.rssi)),
