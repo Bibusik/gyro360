@@ -574,6 +574,26 @@ Widget _pageTitle(String title) => Padding(
   child: Text(title, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
 );
 
+// Единый вид ВСЕХ переключателей: подпись слева, сам переключатель прижат к
+// правому краю и одного размера везде. Раньше часть шла через _row(), где
+// контрол занимал колонку по центру строки и выглядел крупнее - на одном
+// экране соседствовали два разных вида.
+Widget _switchRow(String label, bool value, void Function(bool)? onChanged,
+                  {double hPad = 16}) =>
+    Padding(
+      padding: EdgeInsets.symmetric(horizontal: hPad),
+      child: SizedBox(
+        height: 34,
+        child: Row(children: [
+          Expanded(child: Text(label, style: const TextStyle(fontSize: 13))),
+          Transform.scale(
+            scale: 0.75,
+            child: Switch(value: value, onChanged: onChanged),
+          ),
+        ]),
+      ),
+    );
+
 Widget _row(String label, Widget control) => Padding(
   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
   child: Row(children: [
@@ -911,7 +931,7 @@ class _GyroPageState extends State<_GyroPage> {
     final s = widget.state; final bt = widget.bt;
     return SingleChildScrollView(child: Column(children: [
       _pageTitle('Gyro page'),
-      _row('Reverse gyro:', Switch(value: s.gyroReverse, onChanged: (v) { setState(() => s.gyroReverse = v); bt.send('GYRO_REV=${v ? 1 : 0};'); })),
+      _switchRow('Reverse gyro:', s.gyroReverse, (v) { setState(() => s.gyroReverse = v); bt.send('GYRO_REV=${v ? 1 : 0};'); }),
       _LiftThresholdRow(state: s, bt: bt),
       _row('Lift axis:', Container(
         decoration: BoxDecoration(color: Colors.yellow, borderRadius: BorderRadius.circular(4), border: Border.all(color: Colors.grey.shade400)),
@@ -923,7 +943,7 @@ class _GyroPageState extends State<_GyroPage> {
           onChanged: (v) { if (v == null) return; setState(() => s.liftAxisRoll = v); bt.send('LIFT_AXIS=${v ? 1 : 0};'); },
         )),
       )),
-      _row('Auto switch:', Switch(value: s.gyro6axis, onChanged: (v) { setState(() => s.gyro6axis = v); bt.send('LIFT_FUNC=${v ? 1 : 0};'); })),
+      _switchRow('Auto switch:', s.gyro6axis, (v) { setState(() => s.gyro6axis = v); bt.send('LIFT_FUNC=${v ? 1 : 0};'); }),
       Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), child: Row(children: [
         const Expanded(flex: 2, child: Text('Gyro calib:', style: TextStyle(fontSize: 16))),
         ElevatedButton(onPressed: () => showDialog(context: context, builder: (ctx) => AlertDialog(title: const Text('Gyro calibration'), content: const Text("1. Power OFF\n2. Hold GYRO button\n3. Power ON\n4. Release after 1 flash (3s)\n5. Saves and restarts"), actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK'))])), style: ElevatedButton.styleFrom(backgroundColor: Colors.grey.shade300, foregroundColor: Colors.black), child: const Text('Instruction')),
@@ -983,9 +1003,9 @@ class _PedalPageState extends State<_PedalPage> {
     final s = widget.state; final bt = widget.bt;
     return SingleChildScrollView(child: Column(children: [
       _pageTitle('Pedal page'),
-      _row('Keep search pos:', Switch(value: s.keepSearchPos, onChanged: (v) { setState(() => s.keepSearchPos = v); bt.send('SAVE_POS=${v ? 1 : 0};'); })),
-      _row('Reverse Wire Pedal:', Switch(value: s.reverseWire, onChanged: (v) { setState(() => s.reverseWire = v); bt.send('PEDAL_WIRE_REV=${v ? 1 : 0};'); })),
-      _row('Reverse WiFi Pedal:', Switch(value: s.reverseWifi, onChanged: (v) { setState(() => s.reverseWifi = v); bt.send('PEDAL_WIFI_REV=${v ? 1 : 0};'); })),
+      _switchRow('Keep search pos:', s.keepSearchPos, (v) { setState(() => s.keepSearchPos = v); bt.send('SAVE_POS=${v ? 1 : 0};'); }),
+      _switchRow('Reverse Wire Pedal:', s.reverseWire, (v) { setState(() => s.reverseWire = v); bt.send('PEDAL_WIRE_REV=${v ? 1 : 0};'); }),
+      _switchRow('Reverse WiFi Pedal:', s.reverseWifi, (v) { setState(() => s.reverseWifi = v); bt.send('PEDAL_WIFI_REV=${v ? 1 : 0};'); }),
       Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4), child: Column(children: [
         Row(children: [
           const Text('Search ON msec:', style: TextStyle(fontSize: 16)),
@@ -1410,21 +1430,10 @@ class _RemotePageState extends State<_RemotePage> {
     }
   }
 
-  // Компактная строка-переключатель: три штуки подряд обычными SwitchListTile
-  // с подписями занимали пол-экрана. Пояснения убраны в сам заголовок, высота
-  // строки минимальная.
-  Widget _miniSwitch(String label, bool value, void Function(bool) onChanged) {
-    return SizedBox(
-      height: 34,
-      child: Row(children: [
-        Expanded(child: Text(label, style: const TextStyle(fontSize: 13))),
-        Transform.scale(
-          scale: 0.75,
-          child: Switch(value: value, onChanged: onChanged),
-        ),
-      ]),
-    );
-  }
+  // Тот же вид, что и у остальных переключателей, но без внешних отступов -
+  // этот блок и так лежит внутри контейнера со своим полем.
+  Widget _miniSwitch(String label, bool value, void Function(bool) onChanged) =>
+      _switchRow(label, value, onChanged, hPad: 0);
 
   static double _wrap180(double deg) {
     if (deg > 180) return deg - 360;
@@ -1903,7 +1912,7 @@ class _RemotePageState extends State<_RemotePage> {
     final enabled = s.wt901Enabled;
 
     return SingleChildScrollView(child: Column(children: [
-      _pageTitle('Rod Remote'),
+      _pageTitle('Gyro360 remote'),
 
       // Источник управления: физический пульт WT901 / выключено / телефон.
       // Все настройки ниже (мёртвая зона, обе скорости, ось, реверс, ноль)
@@ -1919,7 +1928,10 @@ class _RemotePageState extends State<_RemotePage> {
           const SizedBox(height: 8),
           SegmentedButton<RemoteSource>(
             segments: const [
-              ButtonSegment(value: RemoteSource.wt901, label: Text('WT901'), icon: Icon(Icons.settings_remote)),
+              // Подпись 'Gyro360' вместо 'WT901': заводское имя датчика владельцу
+              // ничего не говорит. Полное 'Gyro360 remote' в кнопку из трёх
+              // сегментов не помещается - оно вынесено в заголовок страницы.
+              ButtonSegment(value: RemoteSource.wt901, label: Text('Gyro360'), icon: Icon(Icons.settings_remote)),
               ButtonSegment(value: RemoteSource.off,   label: Text('Off'),   icon: Icon(Icons.power_settings_new)),
               ButtonSegment(value: RemoteSource.phone, label: Text('Phone'), icon: Icon(Icons.smartphone)),
             ],
@@ -2079,36 +2091,24 @@ class _RemotePageState extends State<_RemotePage> {
                 // уходит командой PITCH=, то есть на коробке всегда ось 1 -
                 // осевые переключатели WT901 к нему неприменимы).
                 if (_source == RemoteSource.phone && _phoneTilt == 0)
-                  _row('Reverse Pitch', Switch(
-                    value: _phoneRevPitch,
-                    onChanged: (v) {
+                  _switchRow('Reverse Pitch', _phoneRevPitch, (v) {
                       setState(() => _phoneRevPitch = v);
                       _saveAxisPrefs();
-                    },
-                  ))
+                    })
                 else if (_source == RemoteSource.phone && _phoneTilt == 1)
-                  _row('Reverse Roll', Switch(
-                    value: _phoneRevRoll,
-                    onChanged: (v) {
+                  _switchRow('Reverse Roll', _phoneRevRoll, (v) {
                       setState(() => _phoneRevRoll = v);
                       _saveAxisPrefs();
-                    },
-                  ))
+                    })
                 else if (s.wt901Axis == 1)
-                  _row('Reverse Roll', Switch(
-                    value: s.wt901PitchReverse,
-                    onChanged: (v) { setState(() => s.wt901PitchReverse = v); bt.send('WT901_PITCH_REV=${v ? 1 : 0};'); },
-                  ))
+                  _switchRow('Reverse Roll', s.wt901PitchReverse,
+                      (v) { setState(() => s.wt901PitchReverse = v); bt.send('WT901_PITCH_REV=${v ? 1 : 0};'); })
                 else if (s.wt901Axis == 0)
-                  _row('Reverse Pitch', Switch(
-                    value: s.wt901RollReverse,
-                    onChanged: (v) { setState(() => s.wt901RollReverse = v); bt.send('WT901_ROLL_REV=${v ? 1 : 0};'); },
-                  ))
+                  _switchRow('Reverse Pitch', s.wt901RollReverse,
+                      (v) { setState(() => s.wt901RollReverse = v); bt.send('WT901_ROLL_REV=${v ? 1 : 0};'); })
                 else
-                  _row('Reverse Yaw', Switch(
-                    value: s.wt901YawReverse,
-                    onChanged: (v) { setState(() => s.wt901YawReverse = v); bt.send('WT901_YAW_REV=${v ? 1 : 0};'); },
-                  )),
+                  _switchRow('Reverse Yaw', s.wt901YawReverse,
+                      (v) { setState(() => s.wt901YawReverse = v); bt.send('WT901_YAW_REV=${v ? 1 : 0};'); }),
                 // Слежение за Yaw работает ТОЛЬКО в режиме OFF - при включённом
                 // встроенном гироскопе оно молча ничего не делает. Этот режим
                 // гасит гироскоп на время работы Yaw и возвращает обратно.
@@ -2163,13 +2163,10 @@ class _RemotePageState extends State<_RemotePage> {
                     onChanged: (v) => setState(() { _draggingSlider = true; _speedVal = v; }),
                     onChangeEnd: (v) { _draggingSlider = false; s.wt901Speed = v.round(); bt.send('WT901_SPEED=${v.round()};'); }),
                 ])),
-                Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), child: _row('2nd speed:', Switch(
-                  value: s.wt901Speed2Enabled,
-                  onChanged: (v) {
-                    setState(() => s.wt901Speed2Enabled = v);
-                    bt.send('WT901_SPEED2_EN=${v ? 1 : 0};');
-                  },
-                ))),
+                _switchRow('2nd speed:', s.wt901Speed2Enabled, (v) {
+                  setState(() => s.wt901Speed2Enabled = v);
+                  bt.send('WT901_SPEED2_EN=${v ? 1 : 0};');
+                }),
                 Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4), child: Column(children: [
                   Row(children: [
                     const Text('2nd speed angle (°):', style: TextStyle(fontSize: 16)),
@@ -2215,7 +2212,7 @@ class _RemotePageState extends State<_RemotePage> {
                   Icon(Icons.sensors, color: _connectedMac != null ? Colors.green : Colors.grey),
                   const SizedBox(width: 8),
                   Expanded(child: Text(
-                    _connectedMac != null ? 'Rod Remote: $_connectedName' : 'Rod Remote: not selected',
+                    _connectedMac != null ? 'Paired: $_connectedName' : 'Remote: not paired',
                     style: TextStyle(
                       fontWeight: FontWeight.bold,
                       color: _connectedMac != null ? Colors.green.shade800 : Colors.grey.shade700,
