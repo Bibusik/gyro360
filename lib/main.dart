@@ -178,6 +178,8 @@ class AppState extends ChangeNotifier {
   // Гасить ли встроенный гироскоп на время слежения за Yaw. Живёт в прошивке
   // (и во флеше коробки), поэтому работает и без приложения - с веб-страницы.
   bool yawAutoGyro = false;
+  // Алгоритм самого датчика по ЕГО ответу: -1 не отвечал, 0 = 9 осей, 1 = 6 осей.
+  int wt901SensorAxis = -1;
 
   void reset() {
     motorDeg = 0; reduction = 0; maxSpeedRpm = 0; minSpeedRpm = 0;
@@ -264,6 +266,7 @@ class AppState extends ChangeNotifier {
         case 'WT901_PITCH_ZERO': wt901PitchZero = double.tryParse(v) ?? wt901PitchZero;
         case 'WT901_SRC': wt901SrcPhone = v == '1';
         case 'YAW_AUTO_GYRO': yawAutoGyro = v == '1';
+        case 'WT901_SENSOR_AXIS': wt901SensorAxis = int.tryParse(v) ?? wt901SensorAxis;
       }
     }
     notifyListeners();
@@ -356,7 +359,9 @@ class _MainScreenState extends State<MainScreen> {
 
   void _disconnect() async {
     await _bt.disconnect();
-    setState(() {});
+    // Возвращаемся на Home: остальные страницы без подключения закрыты, и
+    // остаться на закрытой было бы тупиком - уйти с неё уже нечем.
+    setState(() => _pageIndex = 0);
   }
 
   @override
@@ -525,12 +530,12 @@ class _TopBar extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
             children: [
               _NavBtn(icon: Icons.home,                    index: 0, current: pageIndex, onTap: onPageChanged),
-              _NavBtn(icon: Icons.settings_input_component, index: 1, current: pageIndex, onTap: onPageChanged),
-              _NavBtn(icon: Icons.explore,                 index: 2, current: pageIndex, onTap: onPageChanged),
-              _NavBtn(icon: Icons.directions_walk,         index: 3, current: pageIndex, onTap: onPageChanged),
-              _NavBtn(icon: Icons.radio,                   index: 4, current: pageIndex, onTap: onPageChanged),
-              _NavBtn(icon: Icons.sensors,                 index: 5, current: pageIndex, onTap: onPageChanged),
-              _NavBtn(icon: Icons.system_update,           index: 6, current: pageIndex, onTap: onPageChanged),
+              _NavBtn(icon: Icons.settings_input_component, index: 1, current: pageIndex, onTap: onPageChanged, enabled: isConnected),
+              _NavBtn(icon: Icons.explore,                 index: 2, current: pageIndex, onTap: onPageChanged, enabled: isConnected),
+              _NavBtn(icon: Icons.directions_walk,         index: 3, current: pageIndex, onTap: onPageChanged, enabled: isConnected),
+              _NavBtn(icon: Icons.radio,                   index: 4, current: pageIndex, onTap: onPageChanged, enabled: isConnected),
+              _NavBtn(icon: Icons.sensors,                 index: 5, current: pageIndex, onTap: onPageChanged, enabled: isConnected),
+              _NavBtn(icon: Icons.system_update,           index: 6, current: pageIndex, onTap: onPageChanged, enabled: isConnected),
             ],
           ),
           const SizedBox(height: 4),
@@ -553,16 +558,25 @@ class _NavBtn extends StatelessWidget {
   final IconData icon;
   final int index, current;
   final ValueChanged<int> onTap;
-  const _NavBtn({required this.icon, required this.index, required this.current, required this.onTap});
+  // Пока ротатор не подключён, все страницы кроме Home закрыты: на них нет ни
+  // одного показания, а любой переключатель отправил бы команду в пустоту и
+  // остался бы в положении, которого на роторе нет. Раньше их можно было
+  // открыть и накрутить настройки, которые никуда не уходили.
+  final bool enabled;
+  const _NavBtn({required this.icon, required this.index, required this.current,
+                 required this.onTap, this.enabled = true});
   @override
   Widget build(BuildContext context) {
     final active = index == current;
     return GestureDetector(
-      onTap: () => onTap(index),
-      child: Container(
-        padding: const EdgeInsets.all(6),
-        decoration: BoxDecoration(color: active ? Colors.white : Colors.white24, borderRadius: BorderRadius.circular(8)),
-        child: Icon(icon, color: active ? const Color(0xFF546E7A) : Colors.white, size: 22),
+      onTap: enabled ? () => onTap(index) : null,
+      child: Opacity(
+        opacity: enabled ? 1.0 : 0.35,
+        child: Container(
+          padding: const EdgeInsets.all(6),
+          decoration: BoxDecoration(color: active ? Colors.white : Colors.white24, borderRadius: BorderRadius.circular(8)),
+          child: Icon(icon, color: active ? const Color(0xFF546E7A) : Colors.white, size: 22),
+        ),
       ),
     );
   }
@@ -1931,7 +1945,9 @@ class _RemotePageState extends State<_RemotePage> {
               // Подпись 'Gyro360' вместо 'WT901': заводское имя датчика владельцу
               // ничего не говорит. Полное 'Gyro360 remote' в кнопку из трёх
               // сегментов не помещается - оно вынесено в заголовок страницы.
-              ButtonSegment(value: RemoteSource.wt901, label: Text('Gyro360'), icon: Icon(Icons.settings_remote)),
+              ButtonSegment(value: RemoteSource.wt901,
+                  label: Text('Gyro360\nremote', textAlign: TextAlign.center),
+                  icon: Icon(Icons.settings_remote)),
               ButtonSegment(value: RemoteSource.off,   label: Text('Off'),   icon: Icon(Icons.power_settings_new)),
               ButtonSegment(value: RemoteSource.phone, label: Text('Phone'), icon: Icon(Icons.smartphone)),
             ],
@@ -2094,21 +2110,21 @@ class _RemotePageState extends State<_RemotePage> {
                   _switchRow('Reverse Pitch', _phoneRevPitch, (v) {
                       setState(() => _phoneRevPitch = v);
                       _saveAxisPrefs();
-                    })
+                    }, hPad: 0)
                 else if (_source == RemoteSource.phone && _phoneTilt == 1)
                   _switchRow('Reverse Roll', _phoneRevRoll, (v) {
                       setState(() => _phoneRevRoll = v);
                       _saveAxisPrefs();
-                    })
+                    }, hPad: 0)
                 else if (s.wt901Axis == 1)
                   _switchRow('Reverse Roll', s.wt901PitchReverse,
-                      (v) { setState(() => s.wt901PitchReverse = v); bt.send('WT901_PITCH_REV=${v ? 1 : 0};'); })
+                      (v) { setState(() => s.wt901PitchReverse = v); bt.send('WT901_PITCH_REV=${v ? 1 : 0};'); }, hPad: 0)
                 else if (s.wt901Axis == 0)
                   _switchRow('Reverse Pitch', s.wt901RollReverse,
-                      (v) { setState(() => s.wt901RollReverse = v); bt.send('WT901_ROLL_REV=${v ? 1 : 0};'); })
+                      (v) { setState(() => s.wt901RollReverse = v); bt.send('WT901_ROLL_REV=${v ? 1 : 0};'); }, hPad: 0)
                 else
                   _switchRow('Reverse Yaw', s.wt901YawReverse,
-                      (v) { setState(() => s.wt901YawReverse = v); bt.send('WT901_YAW_REV=${v ? 1 : 0};'); }),
+                      (v) { setState(() => s.wt901YawReverse = v); bt.send('WT901_YAW_REV=${v ? 1 : 0};'); }, hPad: 0),
                 // Слежение за Yaw работает ТОЛЬКО в режиме OFF - при включённом
                 // встроенном гироскопе оно молча ничего не делает. Этот режим
                 // гасит гироскоп на время работы Yaw и возвращает обратно.
@@ -2118,6 +2134,19 @@ class _RemotePageState extends State<_RemotePage> {
                   _miniSwitch('Auto-off built-in gyro for Yaw', s.yawAutoGyro, (v) {
                     setState(() => s.yawAutoGyro = v);
                     bt.send('YAW_AUTO_GYRO=${v ? 1 : 0};');
+                  }),
+                // Алгоритм САМОГО ДАТЧИКА: 9 осей - курс считается с
+                // магнитометром и не уползает, но зависит от железа рядом;
+                // 6 осей - чистое интегрирование, железу безразлично, зато
+                // медленно дрейфует. Команду датчику шлёт коробка: подключена
+                // к нему она, второго подключения он не примет.
+                //
+                // Показываем не то, что просили, а что ответил сам датчик:
+                // -1 значит он ещё не отозвался (например, не подключён).
+                if (_source == RemoteSource.wt901 && s.wt901SensorAxis >= 0)
+                  _miniSwitch('Sensor: 9-axis (magnetometer)',
+                      s.wt901SensorAxis == 0, (v) {
+                    bt.send('WT901_SENSOR_AXIS=${v ? 0 : 1};');
                   }),
               ]),
             ),
