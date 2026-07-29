@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'dart:async';
-import 'dart:io' show Platform;
 import 'dart:math';
 import 'dart:typed_data';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
@@ -1107,16 +1106,6 @@ class _RemotePageState extends State<_RemotePage> {
   String? _connectedMac;   // MAC выбранного устройства
   String? _connectedName;
 
-  // Ручной ввод MAC - единственный способ привязать WT901 на iPhone прямо
-  // из приложения (без скана). 6 полей по 2 символа - как на веб-странице
-  // ротора (macb-боксы), а не одно поле с двоеточиями: так меньше шанс
-  // опечататься в формате и вводить удобнее с телефонной клавиатуры.
-  // Отправляется той же командой WT901_MAC=, что и при выборе устройства из
-  // скана на Android - никакого сканирования тут не требуется, это просто
-  // BLE-запись уже известного значения.
-  final List<TextEditingController> _manualMacCtrls = List.generate(6, (_) => TextEditingController());
-  final List<FocusNode> _manualMacFocus = List.generate(6, (_) => FocusNode());
-
   // ── Телефон как источник наклона ──────────────────────────────────────
   // Прошивку менять не нужно: команда PITCH=<угол>; уже есть и кладёт
   // значение туда же, куда пишет настоящий WT901.
@@ -1668,16 +1657,6 @@ class _RemotePageState extends State<_RemotePage> {
     // Скан начинается при раскрытии блока (см. кнопку "Pair / change sensor").
   }
 
-  void _submitManualMac() {
-    final mac = _manualMacCtrls.map((c) => c.text.trim().padLeft(2, '0').toUpperCase()).join(':');
-    setState(() {
-      _connectedMac = mac;
-      _connectedName = _remoteDisplayName;
-    });
-    widget.bt.send('WT901_MAC=$mac;');
-    FocusManager.instance.primaryFocus?.unfocus();
-  }
-
   // Статус "подключено" раньше жил только в локальной переменной сессии
   // (заполнялась лишь когда сами выбрали устройство из скана в этом же
   // запуске приложения) — при перезапуске приложения/переходе между
@@ -1744,25 +1723,35 @@ class _RemotePageState extends State<_RemotePage> {
     // гаснуть остались бы висеть на всём приложении после ухода с этой страницы
     SystemChrome.setPreferredOrientations(DeviceOrientation.values);
     WakelockPlus.disable();
-    for (final c in _manualMacCtrls) { c.dispose(); }
-    for (final f in _manualMacFocus) { f.dispose(); }
     super.dispose();
   }
 
-  // Наши пульты переименовываются в WTGyro360 (утилитой wit_tool в папке
-  // проекта), но с завода датчик зовётся WT901BLE67, и номер у каждого свой.
+  // Привязываем ТОЛЬКО подготовленные датчики - те, что настроены утилитой
+  // wit_tool (папка Eksperement 2\wit_tool). Она даёт датчику имя вида
+  // WTG + адрес без двоеточий, например WTGD2614A030C1E, и заодно ставит 6
+  // осей. Заводской WT901BLE67 в список не попадает намеренно: имя тут работает
+  // как отметка "датчик настроен под ротатор", а не просто как подпись.
   //
-  // Фильтруем по 'WT', а не по 'WTGyro360': иначе новый или сброшенный датчик
-  // пропал бы из списка и привязать его было бы нечем - переименовать можно
-  // только уже привязанный, получался бы замкнутый круг. Префикс 'WT' при этом
-  // безопасен: датчик не принимает имя без него, это требование его прошивки
-  // (проверено на железе - имя без WT просто не применяется).
-  static const _remoteNamePrefix = 'WT';
+  // Адрес в имени - не украшение, а единственный способ узнать его на iPhone:
+  // iOS не отдаёт приложению настоящий MAC (подменяет случайным UUID, своим для
+  // каждого приложения), а имя отдаёт как есть. Поэтому привязка теперь
+  // работает на обеих платформах одинаково, и ручной ввод шести байт на iPhone
+  // больше не нужен.
   // В интерфейсе показываем своё имя: заводское ничего не говорит владельцу.
   static const _remoteDisplayName = 'Gyro360 remote';
 
-  static bool _isRemote(String name) =>
-      name.toUpperCase().startsWith(_remoteNamePrefix);
+  static final _macInName = RegExp(r'^WTG([0-9A-F]{12})$', caseSensitive: false);
+
+  static bool _isRemote(String name) => _macInName.hasMatch(name.trim());
+
+  /// Достаёт настоящий MAC из имени: WTGD2614A030C1E -> D2:61:4A:03:0C:1E.
+  /// Возвращает null, если имя не нашего формата.
+  static String? _macFromName(String name) {
+    final m = _macInName.firstMatch(name.trim());
+    if (m == null) return null;
+    final hex = m.group(1)!.toUpperCase();
+    return [for (var i = 0; i < 12; i += 2) hex.substring(i, i + 2)].join(':');
+  }
 
   void _startScan() {
     setState(() { _scanning = true; _scanResults.clear(); });
@@ -1788,13 +1777,17 @@ class _RemotePageState extends State<_RemotePage> {
   }
 
   void _selectDevice(ScanResult r) {
+    // Адрес берём ИЗ ИМЕНИ, а не из remoteId: на Android они совпадают, а на
+    // iPhone remoteId - это случайный UUID, подставленный системой, и ротатор
+    // по нему датчик не найдёт. Имя же одинаково на обеих платформах.
+    final mac = _macFromName(r.device.platformName);
+    if (mac == null) return;   // в список такие и не попадают, но пусть
     _stopScan();
     setState(() {
-      _connectedMac  = r.device.remoteId.str;
+      _connectedMac  = mac;
       _connectedName = _remoteDisplayName;
     });
-    // Отправляем MAC на ротатор
-    widget.bt.send('WT901_MAC=${r.device.remoteId.str};');
+    widget.bt.send('WT901_MAC=$mac;');
   }
 
   void _disconnectDevice() {
@@ -2227,7 +2220,7 @@ class _RemotePageState extends State<_RemotePage> {
                       setState(() => _showPairing = !_showPairing);
                       // Скан запускаем в момент раскрытия, а не при входе на
                       // страницу: он занимает радио, которое нужно управлению.
-                      if (_showPairing && !Platform.isIOS) _startScan();
+                      if (_showPairing) _startScan();
                       if (!_showPairing) _stopScan();
                     },
                     icon: Icon(_showPairing ? Icons.expand_less : Icons.expand_more, size: 20),
@@ -2243,65 +2236,7 @@ class _RemotePageState extends State<_RemotePage> {
                 // сканирование на iPhone принципиально невозможно - вместо
                 // списка показываем поле ручного ввода (тот же MAC, отправка
                 // идёт обычной BLE-записью, сканирование тут не нужно).
-                if (_showPairing && Platform.isIOS) ...[
-                  Text(
-                    'Scanning is not available on iPhone (iOS hides the real Bluetooth address from apps). '
-                    'Enter the WT901 MAC address manually below.',
-                    style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      for (int i = 0; i < 6; i++) ...[
-                        SizedBox(
-                          width: 36,
-                          child: Focus(
-                            onKeyEvent: (node, event) {
-                              // Backspace на уже пустом поле - прыгаем в
-                              // предыдущее (тот же UX, что у кодов
-                              // подтверждения из 6 цифр).
-                              if (event is KeyDownEvent &&
-                                  event.logicalKey == LogicalKeyboardKey.backspace &&
-                                  _manualMacCtrls[i].text.isEmpty &&
-                                  i > 0) {
-                                FocusScope.of(context).requestFocus(_manualMacFocus[i - 1]);
-                              }
-                              return KeyEventResult.ignored;
-                            },
-                            child: TextField(
-                              controller: _manualMacCtrls[i],
-                              focusNode: _manualMacFocus[i],
-                              textAlign: TextAlign.center,
-                              textCapitalization: TextCapitalization.characters,
-                              maxLength: 2,
-                              decoration: const InputDecoration(
-                                counterText: '',
-                                isDense: true,
-                                contentPadding: EdgeInsets.symmetric(vertical: 8),
-                                border: OutlineInputBorder(),
-                              ),
-                              onChanged: (v) {
-                                // Автопереход к следующему байту - вводить с
-                                // телефонной клавиатуры быстрее без ручного
-                                // перетыкивания между 6 полями.
-                                if (v.length >= 2 && i < 5) {
-                                  FocusScope.of(context).requestFocus(_manualMacFocus[i + 1]);
-                                }
-                              },
-                            ),
-                          ),
-                        ),
-                        if (i < 5) const Padding(padding: EdgeInsets.symmetric(horizontal: 2), child: Text(':')),
-                      ],
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton(onPressed: _submitManualMac, child: const Text('Set MAC')),
-                  ),
-                ] else if (_showPairing) ...[
+                if (_showPairing) ...[
                   Row(children: [
                     const Expanded(child: Text('Nearby devices:', style: TextStyle(fontWeight: FontWeight.bold))),
                     if (_scanning)
