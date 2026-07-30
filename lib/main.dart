@@ -189,6 +189,10 @@ class AppState extends ChangeNotifier {
   // (ESP.getSketchMD5 на её стороне). По ней страница обновления понимает,
   // отличается ли образ на сервере от уже установленного.
   String fwMd5 = '';
+  // Отметка сборки прошивки, которая сейчас в коробке (дата и время
+  // компиляции). Сумма отвечает только "тот же образ или нет", а по этой
+  // строке видно, что именно там стоит.
+  String fwVer = '';
 
   // WT901 настройки (хранятся на ротаторе)
   bool wt901Enabled = false;
@@ -289,6 +293,7 @@ class AppState extends ChangeNotifier {
         case 'PASS': pass = v;
         case 'URL': url = v;
         case 'FW_MD5': fwMd5 = v;
+        case 'FW_VER': fwVer = v;
         case 'WT901_ENABLED': wt901Enabled = v == '1';
         case 'WT901_DEAD': wt901DeadZone = double.tryParse(v) ?? wt901DeadZone;
         case 'WT901_SPEED': wt901Speed = int.tryParse(v) ?? wt901Speed;
@@ -2549,7 +2554,10 @@ class _FirmwarePageState extends State<_FirmwarePage> {
   Widget build(BuildContext context) {
     return SingleChildScrollView(child: Column(children: [
       _pageTitle('Firmware page'),
-      const SizedBox(height: 32),
+      const SizedBox(height: 12),
+      Text(widget.state.fwVer.isEmpty ? 'Installed: unknown' : 'Installed: ${widget.state.fwVer}',
+          style: const TextStyle(fontSize: 13, color: Colors.black54)),
+      const SizedBox(height: 20),
       ElevatedButton(
         onPressed: _busy ? null : _update,
         style: ElevatedButton.styleFrom(
