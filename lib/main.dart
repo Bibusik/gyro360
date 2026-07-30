@@ -2432,6 +2432,13 @@ class _FirmwarePageState extends State<_FirmwarePage> {
       return;
     }
     setState(() { _busy = true; _progress = 0; _status = 'Downloading firmware...'; });
+    // Гаснущий экран для iOS означает уход приложения в фон, а там система
+    // придерживает его работу - передача встаёт, и коробка через двадцать
+    // секунд молчания сама отменяет обновление. Держим экран сами, но
+    // запоминаем прежнее состояние: удержание мог включить пользователь
+    // переключателем Keep screen on, и гасить его после обновления нельзя.
+    final wasAwake = await WakelockPlus.enabled;
+    await WakelockPlus.enable();
     try {
       Uint8List image;
       try {
@@ -2454,6 +2461,7 @@ class _FirmwarePageState extends State<_FirmwarePage> {
 
       await _upload(image, digest);
     } finally {
+      if (!wasAwake) await WakelockPlus.disable();
       if (mounted) setState(() => _busy = false);
     }
   }
@@ -2566,6 +2574,15 @@ class _FirmwarePageState extends State<_FirmwarePage> {
         child: const Text('Update', style: TextStyle(fontSize: 16)),
       ),
       const SizedBox(height: 20),
+      // Пока идёт обновление, экран гасить нельзя - предупреждение должно
+      // бросаться в глаза, поэтому крупно и красным.
+      if (_busy)
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          child: Text('DO NOT TURN OFF THE SCREEN',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.red)),
+        ),
       Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16),
         child: Text(_status.isEmpty ? 'Ready' : _status,
