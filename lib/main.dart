@@ -44,7 +44,7 @@ class Gyro360App extends StatelessWidget {
 // раздавала бы его в статусе любому подключившемуся клиенту, и ссылка с
 // токеном уходила бы в эфир при каждом подключении.
 const String kFirmwareUrl =
-    'https://gyro360.lv/serz/ota.php?t=c0dc4cd791de6a5f24489e572ea6f6dcfb65827a5a82022c8f14f83a153ceca0';
+    'https://gyro360.lv/serz/ota.php?t=68619143c894573a1e9a922992d8df794067c1682b24fb2f2b13f4a92693b99d';
 
 // ─── BLE GATT Manager (Nordic UART Service) ───────────────────────────────────
 class BtManager {
