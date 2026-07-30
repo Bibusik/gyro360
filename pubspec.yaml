@@ -17,6 +17,8 @@ dependencies:
   sensors_plus: ^7.1.0
   shared_preferences: ^2.5.5
   wakelock_plus: ^1.7.0
+  http: ^1.2.2
+  crypto: ^3.0.6
 
 dev_dependencies:
   flutter_test:

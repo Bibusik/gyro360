@@ -8,7 +8,8 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
-import 'package:wifi_scan/wifi_scan.dart';
+import 'package:http/http.dart' as http;
+import 'package:crypto/crypto.dart';
 
 // Источник наклона для режима Rod Remote. Ротатору всё равно, откуда пришёл
 // угол: физический WT901 шлёт его сам по своему BLE-каналу, телефон - командой
@@ -37,6 +38,14 @@ class Gyro360App extends StatelessWidget {
   }
 }
 
+// Адрес прошивки держим здесь, а не в коробке. Во-первых, в новой схеме образ
+// качает телефон, а коробка в интернет не ходит вовсе - хранить адрес загрузки
+// в устройстве, которое ничего не загружает, незачем. Во-вторых, коробка
+// раздавала бы его в статусе любому подключившемуся клиенту, и ссылка с
+// токеном уходила бы в эфир при каждом подключении.
+const String kFirmwareUrl =
+    'https://gyro360.lv/serz/ota.php?t=c0dc4cd791de6a5f24489e572ea6f6dcfb65827a5a82022c8f14f83a153ceca0';
+
 // ─── BLE GATT Manager (Nordic UART Service) ───────────────────────────────────
 class BtManager {
   static final BtManager _instance = BtManager._();
@@ -46,10 +55,12 @@ class BtManager {
   static final Guid _serviceUuid = Guid('6E400001-B5A3-F393-E0A9-E50E24DCCA9E');
   static final Guid _rxCharUuid  = Guid('6E400002-B5A3-F393-E0A9-E50E24DCCA9E'); // телефон -> ESP32
   static final Guid _txCharUuid  = Guid('6E400003-B5A3-F393-E0A9-E50E24DCCA9E'); // ESP32 -> телефон
+  static final Guid _otaCharUuid = Guid('6E400004-B5A3-F393-E0A9-E50E24DCCA9E'); // телефон -> ESP32 (бинарь прошивки)
 
   BluetoothDevice? _device;
   BluetoothCharacteristic? _rxChar; // write
   BluetoothCharacteristic? _txChar; // notify
+  BluetoothCharacteristic? _otaChar; // write without response
   final _dataController = StreamController<String>.broadcast();
   String _buffer = '';
   StreamSubscription? _connSub;
@@ -77,6 +88,7 @@ class BtManager {
     for (final c in svc.characteristics) {
       if (c.uuid == _rxCharUuid) _rxChar = c;
       if (c.uuid == _txCharUuid) _txChar = c;
+      if (c.uuid == _otaCharUuid) _otaChar = c;
     }
     if (_txChar != null) {
       await _txChar!.setNotifyValue(true);
@@ -110,6 +122,25 @@ class BtManager {
     } catch (_) {}
   }
 
+  // Прошивка коробки старше этой сборки такой характеристики не отдаёт —
+  // по её отсутствию и понимаем, что обновляться по BLE ещё нечем.
+  bool get canUpdateOverBle => _otaChar != null && _connected;
+
+  // Размер куска берём от согласованного MTU: три служебных байта уходит на
+  // заголовок ATT. Android соглашается на запрошенные 247, iOS решает сам и
+  // обычно даёт 185 - на iPhone кусок просто получится меньше.
+  int get otaChunkSize {
+    final mtu = _device?.mtuNow ?? 23;
+    final n = mtu - 3;
+    return n < 20 ? 20 : (n > 244 ? 244 : n);
+  }
+
+  Future<void> sendOtaChunk(List<int> data) async {
+    final ch = _otaChar;
+    if (ch == null || !_connected) throw Exception('OTA channel not available');
+    await ch.write(data, withoutResponse: true);
+  }
+
   Future<void> disconnect() async {
     _notifySub?.cancel();
     _connSub?.cancel();
@@ -117,6 +148,7 @@ class BtManager {
     _device = null;
     _rxChar = null;
     _txChar = null;
+    _otaChar = null;
     _connected = false;
     _buffer = '';
   }
@@ -153,6 +185,10 @@ class AppState extends ChangeNotifier {
   // (нет "=", ни один case не совпадает), и в приложении вообще не было
   // видно, идёт ли прошивка и чем она закончилась - как и в вебе до этого.
   String otaMsg = '';
+  // Контрольная сумма прошивки, которая сейчас работает в коробке
+  // (ESP.getSketchMD5 на её стороне). По ней страница обновления понимает,
+  // отличается ли образ на сервере от уже установленного.
+  String fwMd5 = '';
 
   // WT901 настройки (хранятся на ротаторе)
   bool wt901Enabled = false;
@@ -252,6 +288,7 @@ class AppState extends ChangeNotifier {
         case 'SSID': ssid = v;
         case 'PASS': pass = v;
         case 'URL': url = v;
+        case 'FW_MD5': fwMd5 = v;
         case 'WT901_ENABLED': wt901Enabled = v == '1';
         case 'WT901_DEAD': wt901DeadZone = double.tryParse(v) ?? wt901DeadZone;
         case 'WT901_SPEED': wt901Speed = int.tryParse(v) ?? wt901Speed;
@@ -307,6 +344,11 @@ class _MainScreenState extends State<MainScreen> {
         if (trimmed == 'CH_3_ON') { _state.activeChannel = 2; Future.delayed(const Duration(milliseconds: 500), () { if (mounted) setState(() => _state.activeChannel = -1); }); return; }
         if (trimmed == 'CH_4_ON') { _state.activeChannel = 3; Future.delayed(const Duration(milliseconds: 500), () { if (mounted) setState(() => _state.activeChannel = -1); }); return; }
         if (trimmed.startsWith('OTA:')) { _state.otaMsg = trimmed; return; }
+        // Ответами на передачу прошивки занимается страница обновления, у неё
+        // своя подписка. Сюда они попадать не должны: подтверждение приходит
+        // каждые пару килобайт, и перерисовывать из-за них весь экран сотни
+        // раз подряд ни к чему.
+        if (trimmed.startsWith('BOTA_')) return;
         _state.parseData(data);
       });
     });
@@ -2349,192 +2391,182 @@ class _FirmwarePage extends StatefulWidget {
 }
 
 class _FirmwarePageState extends State<_FirmwarePage> {
-  late TextEditingController _ssid, _pass, _url;
-  final _ssidFocus = FocusNode(), _passFocus = FocusNode(), _urlFocus = FocusNode();
-  StreamSubscription<List<WiFiAccessPoint>>? _wifiSub;
-  List<MapEntry<String, int>> _nets = [];
-  bool _scanningWifi = false;
-  bool _showPass = false;
-  // Что отправлено, но ещё не подтверждено ротатором - такие значения нельзя
-  // затирать приходящим статусом, он какое-то время несёт прежние (см.
-  // _onStateChange).
-  String? _ssidPending, _passPending, _urlPending;
+  bool _busy = false;
+  double _progress = 0;   // 0..1, ею же живёт шкала
+  String _status = '';    // строка состояния, по-английски
 
-  @override
-  void initState() {
-    super.initState();
-    _ssid = TextEditingController(text: widget.state.ssid);
-    _pass = TextEditingController(text: widget.state.pass);
-    _url  = TextEditingController(text: widget.state.url);
-    // Кнопки Send убраны — поля отправляют значение сами, как только
-    // теряют фокус (тап в другое место/скрытие клавиатуры).
-    _ssidFocus.addListener(() { if (!_ssidFocus.hasFocus) { _ssidPending = _ssid.text; widget.bt.send('SSID=${_ssid.text};'); } });
-    _passFocus.addListener(() { if (!_passFocus.hasFocus) { _passPending = _pass.text; widget.bt.send('PASS=${_pass.text};'); } });
-    _urlFocus.addListener(()  { if (!_urlFocus.hasFocus)  { _urlPending  = _url.text;  widget.bt.send('URL=${_url.text};'); } });
-    widget.state.addListener(_onStateChange);
+  void _say(String s, {double? p}) {
+    if (!mounted) return;
+    setState(() { _status = s; if (p != null) _progress = p; });
   }
 
-  // Страница создаётся один раз при старте приложения (IndexedStack держит
-  // все страницы смонтированными), а значения SSID/PASS/URL с ротатора
-  // приходят позже (после READ_ALL при подключении) — без этого слушателя
-  // поля так и оставались пустыми, даже когда на роторе что-то сохранено.
-  // Не трогаем поле, если пользователь сейчас его редактирует.
-  void _onStateChange() {
-    final s = widget.state;
-    // Отправленное значение считаем подтверждённым, только когда ротатор
-    // пришлёт его обратно.
-    if (_ssidPending == s.ssid) _ssidPending = null;
-    if (_passPending == s.pass) _passPending = null;
-    if (_urlPending  == s.url)  _urlPending  = null;
-
-    // Защиты "поле в фокусе" мало: поле отправляет значение, ТЕРЯЯ фокус, а
-    // ротатор ещё какое-то время шлёт статус со старым. Стоило перейти из
-    // URL в пароль - и только что введённый адрес молча заменялся прежним.
-    // Дальше Update уходил со старым адресом, и сервер отвечал 404. То же с
-    // паролем: набранный откатывался, поэтому и казалось, что подключиться
-    // можно только "поставив курсор" (то есть введя заново).
-    if (!_ssidFocus.hasFocus && _ssidPending == null && _ssid.text != s.ssid) _ssid.text = s.ssid;
-    if (!_passFocus.hasFocus && _passPending == null && _pass.text != s.pass) _pass.text = s.pass;
-    if (!_urlFocus.hasFocus  && _urlPending  == null && _url.text  != s.url)  _url.text  = s.url;
-  }
-
-  @override
-  void dispose() {
-    widget.state.removeListener(_onStateChange);
-    _wifiSub?.cancel();
-    _ssidFocus.dispose(); _passFocus.dispose(); _urlFocus.dispose();
-    _ssid.dispose(); _pass.dispose(); _url.dispose();
-    super.dispose();
-  }
-
-  // Сканируем WiFi-сети самим телефоном (как в web — там браузер тоже
-  // просто отображает список, доступный устройству, с которого смотрят
-  // страницу), а не ротатором: у ротатора и так одна антенна на WiFi+BLE,
-  // и WiFi.scanNetworks() на его стороне на 1-3+ секунды блокировал радио,
-  // из-за чего активное BLE-соединение с телефоном успевало оборваться.
-  Future<void> _scanWifi() async {
-    setState(() { _scanningWifi = true; _nets = []; });
-    final granted = await [Permission.locationWhenInUse, Permission.nearbyWifiDevices].request();
-    if (granted[Permission.locationWhenInUse]?.isGranted != true) {
-      if (mounted) setState(() => _scanningWifi = false);
+  // Прошивку скачивает сам телефон и отдаёт её коробке по BLE. Раньше коробка
+  // лезла в интернет сама, для чего ей нужна была точка доступа и ~40-45 КБ
+  // единым куском под рукопожатие TLS - на нехватке этой памяти обновление
+  // регулярно и срывалось. Теперь TLS остаётся на телефоне.
+  Future<void> _update() async {
+    if (_busy) return;
+    const url = kFirmwareUrl;
+    if (!widget.bt.canUpdateOverBle) {
+      _say('This rotator firmware has no Bluetooth update channel');
       return;
     }
-    final can = await WiFiScan.instance.canStartScan();
-    if (can != CanStartScan.yes) {
-      if (mounted) setState(() => _scanningWifi = false);
-      return;
-    }
-    await WiFiScan.instance.startScan();
-    _wifiSub?.cancel();
-    _wifiSub = WiFiScan.instance.onScannedResultsAvailable.listen((results) {
-      final nets = <String, int>{};
-      for (final r in results) {
-        if (r.ssid.isEmpty) continue;
-        if (!nets.containsKey(r.ssid) || nets[r.ssid]! < r.level) nets[r.ssid] = r.level;
+    setState(() { _busy = true; _progress = 0; _status = 'Downloading firmware...'; });
+    try {
+      Uint8List image;
+      try {
+        final resp = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 60));
+        if (resp.statusCode != 200) { _say('Download failed: HTTP ${resp.statusCode}', p: 0); return; }
+        image = resp.bodyBytes;
+      } catch (e) {
+        _say('Download failed: $e', p: 0); return;
       }
-      final list = nets.entries.map((e) => MapEntry(e.key, e.value)).toList()
-        ..sort((a, b) => b.value.compareTo(a.value));
-      if (mounted) setState(() { _nets = list; _scanningWifi = false; });
-      // Скан одноразовый: подписка на этот стрим иначе продолжает жить и
-      // подсовывает список повторно при следующем системном скане (даже
-      // не нашем), из-за чего он "всплывал" сам по себе.
-      _wifiSub?.cancel();
-      _wifiSub = null;
+      if (image.length < 4096) { _say('Downloaded file is not a firmware image', p: 0); return; }
+
+      // Сверяем скачанное с тем, что уже стоит в коробке: она сообщает
+      // контрольную сумму работающего образа (ESP.getSketchMD5). Совпало -
+      // передавать полтора мегабайта незачем.
+      final digest = md5.convert(image).toString();
+      if (widget.state.fwMd5.isNotEmpty && widget.state.fwMd5.toLowerCase() == digest.toLowerCase()) {
+        _say('Firmware is already up to date', p: 1);
+        return;
+      }
+
+      await _upload(image, digest);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  // Передача идёт с окном подтверждений: коробка отвечает BOTA_ACK каждые
+  // пару килобайт, и убегать вперёд дальше окна нельзя. Без этого телефон
+  // засыпал бы её пакетами быстрее, чем она успевает писать во флеш (запись
+  // на границе сектора блокирует на десятки миллисекунд), и куски терялись бы
+  // молча - запись без подтверждения ничего не сообщает отправителю.
+  Future<void> _upload(Uint8List image, String digest) async {
+    int acked = 0;
+    int window = 4096;
+    String? error;
+    bool done = false;
+    final ready = Completer<void>();
+
+    final sub = widget.bt.dataStream.listen((line) {
+      final s = line.trim();
+      if (s.startsWith('BOTA_READY=')) {
+        window = int.tryParse(s.substring(11)) ?? window;
+        if (!ready.isCompleted) ready.complete();
+      } else if (s.startsWith('BOTA_ACK=')) {
+        acked = int.tryParse(s.substring(9)) ?? acked;
+      } else if (s == 'BOTA_DONE') {
+        done = true;
+      } else if (s.startsWith('BOTA_ERR=')) {
+        error ??= s.substring(9);
+      } else if (s == '__DISCONNECTED__') {
+        error ??= 'connection lost';
+      }
     });
+
+    try {
+      _say('Preparing rotator...', p: 0);
+      await widget.bt.send('BOTA_BEGIN=${image.length},$digest');
+      try {
+        await ready.future.timeout(const Duration(seconds: 15));
+      } on TimeoutException {
+        _say(error ?? 'Rotator did not respond', p: 0);
+        return;
+      }
+      if (error != null) { _say(error!, p: 0); return; }
+
+      final chunk = widget.bt.otaChunkSize;
+      int sent = 0;
+      int shownPct = -1;
+      int lastAcked = 0;
+      var lastMove = DateTime.now();
+
+      while (sent < image.length) {
+        if (error != null) { _say(error!); return; }
+        if (sent - acked >= window) {          // упёрлись в окно, ждём подтверждения
+          if (acked != lastAcked) { lastAcked = acked; lastMove = DateTime.now(); }
+          if (DateTime.now().difference(lastMove) > const Duration(seconds: 20)) {
+            _say('Transfer stalled'); return;
+          }
+          await Future.delayed(const Duration(milliseconds: 4));
+          continue;
+        }
+        lastAcked = acked; lastMove = DateTime.now();
+        final end = (sent + chunk > image.length) ? image.length : sent + chunk;
+        try {
+          await widget.bt.sendOtaChunk(image.sublist(sent, end));
+        } catch (e) {
+          _say('Send failed: $e'); return;
+        }
+        sent = end;
+        // Проценты считаем по подтверждённому, а не по отправленному: шкала
+        // должна показывать записанное во флеш, иначе она добежала бы до
+        // конца заметно раньше самой прошивки.
+        final pct = acked * 100 ~/ image.length;
+        if (pct != shownPct) {
+          shownPct = pct;
+          _say('Uploading to rotator... $pct%', p: acked / image.length);
+        }
+      }
+
+      await widget.bt.send('BOTA_END');
+      _say('Finishing...', p: 1);
+      // Коробка досчитывает контрольную сумму и переключает загрузочный слот.
+      final deadline = DateTime.now().add(const Duration(seconds: 90));
+      while (!done && error == null && DateTime.now().isBefore(deadline)) {
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+      // Порядок проверок важен: сразу за подтверждением коробка уходит в
+      // перезагрузку, и связь рвётся - обрыв тут означает успех, а не сбой.
+      if (done) {
+        _say('Update complete. Rotator is rebooting.', p: 1);
+      } else {
+        _say(error ?? 'No confirmation from rotator', p: 1);
+      }
+    } finally {
+      await sub.cancel();
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final bt = widget.bt;
     return SingleChildScrollView(child: Column(children: [
       _pageTitle('Firmware page'),
-      _fieldRow('AP name:', _ssid, _ssidFocus),
-      _fieldRow('Password:', _pass, _passFocus, obscure: !_showPass),
-      _fieldRow('Server URL:', _url, _urlFocus),
-      Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-        child: SizedBox(width: double.infinity, child: ElevatedButton.icon(
-          icon: _scanningWifi
-              ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-              : const Icon(Icons.wifi_find),
-          label: Text(_scanningWifi ? 'Scanning...' : 'Scan nearby networks'),
-          onPressed: _scanningWifi ? null : _scanWifi,
-          style: ElevatedButton.styleFrom(backgroundColor: Colors.grey.shade300, foregroundColor: Colors.black, padding: const EdgeInsets.symmetric(vertical: 10)),
-        )),
-      ),
-      if (_nets.isNotEmpty)
-        Container(
-          margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-          padding: const EdgeInsets.symmetric(vertical: 4),
-          decoration: BoxDecoration(color: Colors.grey.shade200, borderRadius: BorderRadius.circular(12)),
-          child: Column(children: _nets.map((n) => ListTile(
-            dense: true,
-            leading: const Icon(Icons.wifi, color: Color(0xFF546E7A)),
-            title: Text(n.key, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-            trailing: Text('${n.value} dBm', style: const TextStyle(fontSize: 12)),
-            onTap: () {
-              setState(() { _ssid.text = n.key; _nets = []; });
-              bt.send('SSID=${n.key};');
-            },
-          )).toList()),
-        ),
-      const SizedBox(height: 16),
+      const SizedBox(height: 32),
       ElevatedButton(
-        onPressed: () async {
-          // Поля SSID/PASS/URL шлют своё значение только по потере фокуса
-          // (см. addListener выше) - если нажать Update сразу после ввода,
-          // не тапнув по другому полю, последняя правка никогда не уходила
-          // на коробку. Явно досылаем текущие значения перед самим Update.
-          // await между вызовами обязателен - без него более длинная запись
-          // (URL с токеном) обрывалась следующим send() раньше, чем BLE-стек
-          // успевал её дописать (send() теперь сам ждёт завершения записи).
-          await bt.send('SSID=${_ssid.text};');
-          await bt.send('PASS=${_pass.text};');
-          await bt.send('URL=${_url.text};');
-          await bt.send('UPDATE=1;');
-        },
-        style: ElevatedButton.styleFrom(backgroundColor: Colors.grey.shade300, foregroundColor: Colors.black, padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 12)),
+        onPressed: _busy ? null : _update,
+        style: ElevatedButton.styleFrom(
+          backgroundColor: Colors.grey.shade300, foregroundColor: Colors.black,
+          padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 12)),
         child: const Text('Update', style: TextStyle(fontSize: 16)),
       ),
-      if (widget.state.otaMsg.isNotEmpty)
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          child: Text(widget.state.otaMsg.replaceFirst('OTA:', '').trim(),
-              textAlign: TextAlign.center, style: const TextStyle(fontSize: 13, color: Colors.black54)),
-        ),
-    ]));
-  }
-
-  Widget _fieldRow(String label, TextEditingController ctrl, FocusNode focusNode, {bool obscure = false}) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Row(children: [
-        Expanded(flex: 2, child: Text(label, style: const TextStyle(fontSize: 16))),
-        Expanded(flex: 3, child: TextField(
-          controller: ctrl, obscureText: obscure, focusNode: focusNode,
-          onSubmitted: (_) => focusNode.unfocus(),
-          decoration: InputDecoration(
-            filled: true, fillColor: Colors.yellow,
-            border: OutlineInputBorder(borderRadius: BorderRadius.circular(4)),
-            contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            isDense: true,
-            // Ротатор присылает сохранённый пароль обратно, и под точками не
-            // видно, что именно там лежит: свой пароль, заводской "gyro360"
-            // или обрезанный остаток. Пока посмотреть было нельзя, оставалось
-            // только вводить заново вслепую.
-            suffixIcon: !_isPassField(ctrl) ? null : IconButton(
-              icon: Icon(_showPass ? Icons.visibility_off : Icons.visibility, size: 20),
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(),
-              tooltip: _showPass ? 'Hide password' : 'Show password',
-              onPressed: () => setState(() => _showPass = !_showPass),
+      const SizedBox(height: 20),
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        child: Text(_status.isEmpty ? 'Ready' : _status,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 14, color: Colors.black87)),
+      ),
+      const SizedBox(height: 10),
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        child: Column(children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: LinearProgressIndicator(
+              value: _progress, minHeight: 14,
+              backgroundColor: Colors.grey.shade300,
+              valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF546E7A)),
             ),
           ),
-          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-        )),
-      ]),
-    );
+          const SizedBox(height: 6),
+          Text('${(_progress * 100).toStringAsFixed(0)}%',
+              style: const TextStyle(fontSize: 13, color: Colors.black54)),
+        ]),
+      ),
+      const SizedBox(height: 20),
+    ]));
   }
-
-  bool _isPassField(TextEditingController ctrl) => identical(ctrl, _pass);
 }
