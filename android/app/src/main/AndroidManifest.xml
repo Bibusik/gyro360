@@ -9,6 +9,11 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE"/>
+    <!-- Нужно, чтобы приложение само скачивало прошивку и отдавало её коробке
+         по BLE. Flutter добавляет это разрешение только в отладочный манифест,
+         поэтому в релизной сборке любой запрос падал с "Failed host lookup" -
+         это выглядело как отсутствие интернета на телефоне, хотя сеть была. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
 
     <application
         android:label="gyro360"
