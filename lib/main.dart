@@ -2400,6 +2400,21 @@ class _FirmwarePageState extends State<_FirmwarePage> {
     setState(() { _status = s; if (p != null) _progress = p; });
   }
 
+  // Текст исключения из http содержит полный адрес запроса - вместе с
+  // токеном. Показывать его нельзя: один раз он уже оказался на экране во
+  // всю ширину. Наружу отдаём только суть, подробности незачем.
+  String _downloadError(Object e) {
+    final s = e.toString();
+    if (s.contains('Failed host lookup') || s.contains('SocketException')) {
+      return 'No internet connection';
+    }
+    if (s.contains('TimeoutException')) return 'Server did not respond';
+    if (s.contains('HandshakeException') || s.contains('CertificateException')) {
+      return 'Secure connection failed';
+    }
+    return 'Download failed';
+  }
+
   // Прошивку скачивает сам телефон и отдаёт её коробке по BLE. Раньше коробка
   // лезла в интернет сама, для чего ей нужна была точка доступа и ~40-45 КБ
   // единым куском под рукопожатие TLS - на нехватке этой памяти обновление
@@ -2419,7 +2434,7 @@ class _FirmwarePageState extends State<_FirmwarePage> {
         if (resp.statusCode != 200) { _say('Download failed: HTTP ${resp.statusCode}', p: 0); return; }
         image = resp.bodyBytes;
       } catch (e) {
-        _say('Download failed: $e', p: 0); return;
+        _say(_downloadError(e), p: 0); return;
       }
       if (image.length < 4096) { _say('Downloaded file is not a firmware image', p: 0); return; }
 
@@ -2497,8 +2512,8 @@ class _FirmwarePageState extends State<_FirmwarePage> {
         final end = (sent + chunk > image.length) ? image.length : sent + chunk;
         try {
           await widget.bt.sendOtaChunk(image.sublist(sent, end));
-        } catch (e) {
-          _say('Send failed: $e'); return;
+        } catch (_) {
+          _say('Send failed'); return;
         }
         sent = end;
         // Проценты считаем по подтверждённому, а не по отправленному: шкала
