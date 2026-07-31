@@ -176,6 +176,10 @@ class AppState extends ChangeNotifier {
   int liftUp = 0;
   int liftDown = 0;
   bool liftAxisRoll = true;
+  // Снято ли рабочее положение коробки (кнопка калибровки на странице Gyro).
+  // Пока не снято, прошивка считает наклон приближённо и верно только до
+  // вертикали; со снятым нулём - точно и на все 180°.
+  bool liftZeroSet = false;
   int activeChannel = -1;
   String ssid = '';
   String pass = '';
@@ -294,6 +298,7 @@ class AppState extends ChangeNotifier {
         case 'URL': url = v;
         case 'FW_MD5': fwMd5 = v;
         case 'FW_VER': fwVer = v;
+        case 'LIFT_ZERO': liftZeroSet = v == '1';
         case 'WT901_ENABLED': wt901Enabled = v == '1';
         case 'WT901_DEAD': wt901DeadZone = double.tryParse(v) ?? wt901DeadZone;
         case 'WT901_SPEED': wt901Speed = int.tryParse(v) ?? wt901Speed;
@@ -1005,9 +1010,18 @@ class _GyroPageState extends State<_GyroPage> {
         )),
       )),
       _switchRow('Auto switch:', s.gyro6axis, (v) { setState(() => s.gyro6axis = v); bt.send('LIFT_FUNC=${v ? 1 : 0};'); }),
+      // Рабочее положение коробки снимается той же калибровкой гироскопа -
+      // отдельной кнопки нет. Тут только видно, снято оно или ещё нет: пока не
+      // снято, подъём считается приближённо и верен лишь до вертикали.
+      Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), child: Row(children: [
+        const Expanded(flex: 2, child: Text('Working position:', style: TextStyle(fontSize: 16))),
+        Expanded(flex: 3, child: Text(s.liftZeroSet ? 'Calibrated' : 'Not set - run gyro calib',
+            style: TextStyle(fontSize: 14, fontWeight: s.liftZeroSet ? FontWeight.bold : FontWeight.normal,
+                color: s.liftZeroSet ? Colors.green.shade800 : Colors.grey.shade600))),
+      ])),
       Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), child: Row(children: [
         const Expanded(flex: 2, child: Text('Gyro calib:', style: TextStyle(fontSize: 16))),
-        ElevatedButton(onPressed: () => showDialog(context: context, builder: (ctx) => AlertDialog(title: const Text('Gyro calibration'), content: const Text("1. Power OFF\n2. Hold GYRO button\n3. Power ON\n4. Release after 1 flash (3s)\n5. Saves and restarts"), actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK'))])), style: ElevatedButton.styleFrom(backgroundColor: Colors.grey.shade300, foregroundColor: Colors.black), child: const Text('Instruction')),
+        ElevatedButton(onPressed: () => showDialog(context: context, builder: (ctx) => AlertDialog(title: const Text('Gyro calibration'), content: const Text("Put the rotator in its normal working position first - the same procedure also records that position and measures lifting from it.\n\n1. Power OFF\n2. Hold GYRO button\n3. Power ON\n4. Release after 1 flash (3s)\n5. Saves and restarts"), actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK'))])), style: ElevatedButton.styleFrom(backgroundColor: Colors.grey.shade300, foregroundColor: Colors.black), child: const Text('Instruction')),
       ])),
       Padding(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4), child: Column(children: [
         Row(children: [
